@@ -6,6 +6,7 @@
  * MCP server for safe, high-signal web browsing and content fetching for LLM agents.
  */
 
+import 'dotenv/config';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {

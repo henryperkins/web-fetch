@@ -234,6 +234,7 @@ export async function httpFetch(
           };
         }
 
+        let redirectCrawlDelay: number | undefined;
         if (respect_robots) {
           const redirectRobots = await checkRobots(redirectUrl, {
             timeoutMs: 10000,
@@ -250,11 +251,12 @@ export async function httpFetch(
               },
             };
           }
+          redirectCrawlDelay = redirectRobots.crawlDelay;
         }
 
         const redirectOrigin = getOrigin(redirectUrl);
         if (redirectOrigin) {
-          await applyCrawlDelay(redirectOrigin, redirectRobots.crawlDelay, user_agent);
+          await applyCrawlDelay(redirectOrigin, redirectCrawlDelay, user_agent);
         }
 
         currentUrl = redirectUrl;

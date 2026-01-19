@@ -48,13 +48,18 @@ export function chunkContent(
 
   const blocks = buildBlocksFromKeyBlocks(packet);
   if (blocks.length > 0) {
-    return chunkBlocks(
+    const chunkSet = chunkBlocks(
       packet.source_id,
       blocks,
       max_tokens,
       effectiveMaxTokens,
       strategy,
     );
+    return {
+      ...chunkSet,
+      original_url: packet.original_url,
+      key_blocks: packet.key_blocks,
+    };
   }
 
   // Find chunk boundaries
@@ -151,6 +156,8 @@ export function chunkContent(
 
   return {
     source_id: packet.source_id,
+    original_url: packet.original_url,
+    key_blocks: packet.key_blocks,
     max_tokens,
     total_chunks: mergedChunks.length,
     total_est_tokens: totalEstTokens,

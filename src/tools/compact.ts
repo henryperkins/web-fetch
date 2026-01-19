@@ -78,6 +78,8 @@ export function getCompactInputSchema(): object {
             properties: {
               source_id: { type: 'string' },
               chunks: { type: 'array' },
+              original_url: { type: 'string' },
+              key_blocks: { type: 'array' },
             },
             required: ['source_id', 'chunks'],
           },

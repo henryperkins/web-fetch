@@ -106,10 +106,10 @@ function extractInput(input: LLMPacket | ChunkSet): {
     const chunkSet = input;
     return {
       sourceId: chunkSet.source_id,
-      originalUrl: '',
+      originalUrl: chunkSet.original_url ?? '',
       content: chunkSet.chunks.map(c => c.text).join('\n\n'),
       chunks: chunkSet.chunks.map(c => c.text),
-      keyBlocks: [],
+      keyBlocks: chunkSet.key_blocks ?? [],
     };
   }
 
@@ -282,8 +282,14 @@ function mapReduceCompaction(
   const warnings: string[] = [];
 
   // Map: summarize each chunk
+  let perChunkBudget = Math.floor(maxTokens / Math.max(1, chunks.length));
+  if (perChunkBudget < 1) {
+    perChunkBudget = 1;
+    warnings.push(`Chunk count (${chunks.length}) exceeds token budget (${maxTokens}); using minimum per-chunk budget`);
+  }
+
   const chunkSummaries = chunks.map((chunk, idx) => {
-    const summary = summarizeChunk(chunk, Math.floor(maxTokens / chunks.length), preserve);
+    const summary = summarizeChunk(chunk, perChunkBudget, preserve);
     return {
       index: idx,
       summary,
@@ -291,7 +297,12 @@ function mapReduceCompaction(
   });
 
   // Reduce: combine summaries
-  let combinedSummary = chunkSummaries.map(c => c.summary).join('\n\n');
+  let combinedSummary = chunkSummaries.map(c => c.summary).join('\n\n').trim();
+
+  if (!combinedSummary && content.trim()) {
+    warnings.push('Map-reduce produced empty chunk summaries; falling back to truncated content');
+    combinedSummary = truncateToTokens(content, Math.max(1, maxTokens)).text;
+  }
 
   // If still too long, compress further
   while (estimateTokens(combinedSummary) > maxTokens) {
@@ -560,8 +571,18 @@ function scoreSentenceSalience(sentence: string, preserve: PreserveType[]): numb
 }
 
 function summarizeChunk(chunk: string, maxTokens: number, preserve: PreserveType[]): string {
+  if (maxTokens <= 0) {
+    return '';
+  }
+
+  if (estimateTokens(chunk) <= maxTokens) {
+    return chunk;
+  }
+
   const sentences = splitIntoSentences(chunk);
-  if (sentences.length <= 3) return chunk;
+  if (sentences.length <= 3) {
+    return truncateToTokens(chunk, maxTokens).text;
+  }
 
   // Score and select top sentences
   const scored = sentences.map((s, i) => ({
@@ -584,7 +605,11 @@ function summarizeChunk(chunk: string, maxTokens: number, preserve: PreserveType
 
   // Restore order
   result.sort((a, b) => a.index - b.index);
-  return formatSummary(dedupeSentences(result.map(s => s.text)));
+  const summary = formatSummary(dedupeSentences(result.map(s => s.text)));
+  if (!summary.trim()) {
+    return truncateToTokens(chunk, maxTokens).text;
+  }
+  return summary;
 }
 
 function summarizeOmission(text: string): string {

@@ -76,6 +76,8 @@ export function detectContentType(
   const charsetPart = parts.find(p => p.trim().startsWith('charset='));
   const charset = charsetPart?.split('=')[1]?.trim();
 
+  const isTextType = mimeType.startsWith('text/');
+
   // Determine type category
   if (mimeType.includes('html')) {
     return { type: 'html', mimeType, charset };
@@ -91,9 +93,6 @@ export function detectContentType(
   }
   if (mimeType.includes('xml') || mimeType === 'application/rss+xml' || mimeType === 'application/atom+xml') {
     return { type: 'xml', mimeType, charset };
-  }
-  if (mimeType.startsWith('text/plain')) {
-    return { type: 'text', mimeType, charset };
   }
 
   // Sniff content if uncertain
@@ -129,6 +128,10 @@ export function detectContentType(
     if (/^---\r?\n/.test(start) || /^#\s+/.test(start) || /^\[.+\]\(.+\)/.test(start)) {
       return { type: 'markdown', mimeType: 'text/markdown', charset };
     }
+  }
+
+  if (isTextType) {
+    return { type: 'text', mimeType, charset };
   }
 
   return { type: 'unknown', mimeType, charset };
@@ -212,19 +215,30 @@ function extractKeyBlocks(markdown: string): KeyBlock[] {
 
   let inCodeBlock = false;
   let inList = false;
+  let fenceChar = '';
+  let fenceLength = 0;
 
   for (const line of lines) {
     // Code block detection
-    if (line.trim().startsWith('```')) {
-      if (inCodeBlock) {
+    const fenceMatch = line.match(/^\s*(```+|~~~+)/);
+    if (fenceMatch) {
+      const fenceMarker = fenceMatch[1]!;
+      const markerChar = fenceMarker[0]!;
+      if (!inCodeBlock) {
+        flushBlock();
+        inCodeBlock = true;
+        fenceChar = markerChar;
+        fenceLength = fenceMarker.length;
+        currentKind = 'code';
+        currentBlock.push(line);
+      } else if (markerChar === fenceChar && fenceMarker.length >= fenceLength) {
         currentBlock.push(line);
         flushBlock();
         inCodeBlock = false;
+        fenceChar = '';
+        fenceLength = 0;
         currentKind = 'paragraph';
       } else {
-        flushBlock();
-        inCodeBlock = true;
-        currentKind = 'code';
         currentBlock.push(line);
       }
       continue;

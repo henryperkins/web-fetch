@@ -22,6 +22,7 @@
     "@aws-sdk/client-s3": "^3.970.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@mozilla/readability": "^0.5.0",
+    "dotenv": "^17.2.3",
     "fast-xml-parser": "^4.3.0",
     "jsdom": "^24.0.0",
     "pdfjs-dist": "^4.0.0",
@@ -31,7 +32,7 @@
     "yaml": "^2.3.0"
   },
   "optionalDependencies": {
-    "playwright": "^1.41.0"
+    "playwright": "^1.57.0"
   },
   "devDependencies": {
     "@types/jsdom": "^21.1.0",

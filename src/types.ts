@@ -226,6 +226,8 @@ export interface Chunk {
 
 export interface ChunkSet {
   source_id: string;
+  original_url?: string;
+  key_blocks?: KeyBlock[];
   max_tokens: number;
   total_chunks: number;
   total_est_tokens: number;

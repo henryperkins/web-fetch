@@ -4,7 +4,8 @@
 
 import { describe, it, expect } from 'vitest';
 import { executeCompact } from '../../src/tools/compact.js';
-import type { LLMPacket } from '../../src/types.js';
+import { chunkContent } from '../../src/processing/chunker.js';
+import type { LLMPacket, ChunkSet } from '../../src/types.js';
 
 describe('Compact tool', () => {
   it('should compact minimal packet input', () => {
@@ -119,5 +120,82 @@ The price is $10 for early access.`,
     expect(keyPoints.length).toBeGreaterThan(0);
     const pricePoint = keyPoints.find(point => point.text.includes('$10'));
     expect(pricePoint?.citation).toBe('b1');
+  });
+
+  it('should preserve original_url and citations when compacting a ChunkSet', () => {
+    const packet = {
+      source_id: 'source-6',
+      original_url: 'https://example.com/pricing',
+      canonical_url: 'https://example.com/pricing',
+      retrieved_at: new Date().toISOString(),
+      status: 200,
+      content_type: 'text/markdown',
+      metadata: { title: 'Pricing' },
+      outline: [],
+      key_blocks: [
+        {
+          block_id: 'b0',
+          kind: 'heading',
+          text: '# Pricing',
+          char_len: '# Pricing'.length,
+        },
+        {
+          block_id: 'b1',
+          kind: 'paragraph',
+          text: 'The price is $10 for early access.',
+          char_len: 'The price is $10 for early access.'.length,
+        },
+      ],
+      content: '# Pricing\n\nThe price is $10 for early access.',
+      source_summary: [],
+      citations: [],
+      unsafe_instructions_detected: [],
+      warnings: [],
+      hashes: { content_hash: 'abc', raw_hash: 'def' },
+    } as LLMPacket;
+
+    const chunkSet = chunkContent(packet, { max_tokens: 200 });
+
+    const result = executeCompact({
+      input: chunkSet,
+      options: {
+        max_tokens: 50,
+        mode: 'salience',
+        preserve: ['numbers'],
+      },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.compacted?.original_url).toBe(packet.original_url);
+    const keyPoints = result.compacted?.compacted.key_points ?? [];
+    expect(keyPoints.some(point => point.citation === 'b1')).toBe(true);
+  });
+
+  it('should warn when chunk count exceeds map-reduce token budget', () => {
+    const chunkSet: ChunkSet = {
+      source_id: 'source-7',
+      max_tokens: 10,
+      total_chunks: 5,
+      total_est_tokens: 5,
+      chunks: [
+        { chunk_id: 'c0', chunk_index: 0, headings_path: '', est_tokens: 1, text: 'Alpha one.', char_len: 10 },
+        { chunk_id: 'c1', chunk_index: 1, headings_path: '', est_tokens: 1, text: 'Bravo two.', char_len: 10 },
+        { chunk_id: 'c2', chunk_index: 2, headings_path: '', est_tokens: 1, text: 'Charlie three.', char_len: 14 },
+        { chunk_id: 'c3', chunk_index: 3, headings_path: '', est_tokens: 1, text: 'Delta four.', char_len: 11 },
+        { chunk_id: 'c4', chunk_index: 4, headings_path: '', est_tokens: 1, text: 'Echo five.', char_len: 10 },
+      ],
+    };
+
+    const result = executeCompact({
+      input: chunkSet,
+      options: {
+        max_tokens: 2,
+        mode: 'map_reduce',
+      },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.compacted?.compacted.summary.length).toBeGreaterThan(0);
+    expect(result.compacted?.compacted.warnings.length).toBeGreaterThan(0);
   });
 });
