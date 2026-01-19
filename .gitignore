@@ -26,4 +26,4 @@ npm-debug.log*
 # Test coverage
 coverage/
 package-lock.json
-
+resources-plan.md
