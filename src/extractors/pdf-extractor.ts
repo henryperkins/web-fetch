@@ -49,14 +49,16 @@ export async function extractPdf(
   }
 
   try {
-    // Dynamic import to avoid loading if not needed
-    const pdfjsLib = await import('pdfjs-dist');
+    // Dynamic import to avoid loading if not needed. Use the legacy build to avoid
+    // stdout warnings that would corrupt MCP stdio transport.
+    const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
 
     // Create document
     const loadingTask = pdfjsLib.getDocument({
       data: new Uint8Array(buffer),
       useSystemFonts: true,
       disableFontFace: true,
+      verbosity: pdfjsLib.VerbosityLevel?.ERRORS ?? 0,
     });
 
     const pdfDoc = await loadingTask.promise;

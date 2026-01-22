@@ -208,7 +208,13 @@ export async function browserRender(
 
       // Block third-party if configured
       if (block_third_party) {
-        const requestOrigin = new URL(requestUrl).origin;
+        let requestOrigin: string;
+        try {
+          requestOrigin = new URL(requestUrl).origin;
+        } catch {
+          await route.abort('blockedbyclient');
+          return;
+        }
         if (requestOrigin !== targetOrigin) {
           // Allow CDN resources but block tracking/ads
           const isCommonCDN =

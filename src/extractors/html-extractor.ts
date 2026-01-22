@@ -234,7 +234,7 @@ export function extractHtml(
 
       markdown = turndownService.turndown(contentDom.window.document.body);
     } else {
-      markdown = extractedContent.textContent;
+      markdown = extractedContent.textContent || '';
     }
 
     // Clean up markdown

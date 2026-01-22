@@ -93,8 +93,8 @@ export function sanitizeMarkdown(md: string): { markdown: string; warnings: stri
   result = result.replace(/\s+on\w+="[^"]*"/gi, '');
   result = result.replace(/\s+on\w+='[^']*'/gi, '');
 
-  // Normalize code fence markers (ensure consistent ```)
-  result = result.replace(/^~~~(\w*)/gm, '```$1');
+  // Note: We preserve tilde fences (~~~) as-is since they may be intentionally
+  // used to distinguish from nested backtick fences in documentation
 
   // Ensure code blocks have newline after opening fence
   result = result.replace(/```(\w+)([^\n])/g, '```$1\n$2');

@@ -104,7 +104,7 @@ function extractRss(
     itemCount: 0,
   };
 
-  const rawItems = channel['item'] as unknown[];
+  const rawItems = (channel['item'] ?? []) as unknown[];
   const items: FeedItem[] = [];
 
   if (Array.isArray(rawItems)) {
@@ -424,6 +424,9 @@ function stripHtml(html: string | undefined): string | undefined {
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
     .replace(/\s+/g, ' ')
     .trim();
 }
