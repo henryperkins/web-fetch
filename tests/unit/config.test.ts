@@ -20,6 +20,11 @@ function createValidConfig(overrides: Partial<Config> = {}): Config {
     renderTimeoutMs: 60000,
     userAgent: 'test-agent',
     aiSearchEnabled: false,
+    aiSearchScope: 'conversation',
+    aiSearchThreadKey: undefined,
+    aiSearchStateDir: '/tmp/web-fetch-mcp-test',
+    aiSearchRequireThreadKey: false,
+    aiSearchWorkspaceRoot: undefined,
     aiSearchMaxFileBytes: 4 * 1024 * 1024,
     aiSearchQueryTimeoutMs: 15000,
     aiSearchQueryWaitMs: 0,
@@ -183,6 +188,22 @@ describe('validateConfig', () => {
       });
       const errors = validateConfig(config);
       expect(errors).toEqual([]);
+    });
+
+    it('requires thread key when conversation scope and requireThreadKey is true', () => {
+      const config = createValidConfig({
+        aiSearchEnabled: true,
+        aiSearchRequireThreadKey: true,
+        aiSearchThreadKey: undefined,
+        aiSearchAccountId: 'account',
+        aiSearchR2Bucket: 'bucket',
+        aiSearchR2AccessKeyId: 'key',
+        aiSearchR2SecretAccessKey: 'secret',
+      });
+      const errors = validateConfig(config);
+      expect(errors).toContainEqual(
+        expect.stringContaining('WEB_FETCH_THREAD_KEY')
+      );
     });
   });
 });

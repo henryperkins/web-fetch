@@ -11,6 +11,7 @@ export type WaitUntil = 'load' | 'domcontentloaded' | 'networkidle';
 export type OutputFormat = 'llm_packet' | 'raw' | 'normalized';
 export type ChunkStrategy = 'headings_first' | 'balanced';
 export type CompactMode = 'structural' | 'salience' | 'map_reduce' | 'question_focused';
+export type AiSearchScope = 'conversation' | 'workspace' | 'global';
 
 export interface RenderOptions {
   wait_until?: WaitUntil;
@@ -67,6 +68,8 @@ export interface AiSearchQueryOptions {
 }
 
 export interface AiSearchOptions {
+  /** Optional per-request thread key to scope uploads/queries to a conversation. */
+  thread_key?: string;
   enabled?: boolean;
   prefix?: string;
   max_file_bytes?: number;
@@ -326,7 +329,14 @@ export interface Config {
   renderBlockThirdParty: boolean;
   renderTimeoutMs: number;
   userAgent: string;
+
+  // AI Search / KB
   aiSearchEnabled: boolean;
+  aiSearchScope: AiSearchScope;
+  aiSearchThreadKey?: string;
+  aiSearchStateDir: string;
+  aiSearchRequireThreadKey: boolean;
+  aiSearchWorkspaceRoot?: string;
   aiSearchAccountId?: string;
   aiSearchName?: string;
   aiSearchApiToken?: string;

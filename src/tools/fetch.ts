@@ -547,6 +547,10 @@ export function getFetchInputSchema(): object {
                 type: 'boolean',
                 description: 'Upload extracted content to Cloudflare R2 for AI Search indexing',
               },
+              thread_key: {
+                type: 'string',
+                description: 'Stable conversation/thread identifier used to scope the knowledge base (overrides WEB_FETCH_THREAD_KEY)',
+              },
               prefix: {
                 type: 'string',
                 description: 'Optional prefix for R2 object keys',

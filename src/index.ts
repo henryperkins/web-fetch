@@ -27,6 +27,7 @@ import { executeFetch, getFetchInputSchema } from './tools/fetch.js';
 import { executeExtract, getExtractInputSchema } from './tools/extract.js';
 import { executeChunk, getChunkInputSchema } from './tools/chunk.js';
 import { executeCompact, getCompactInputSchema } from './tools/compact.js';
+import { executeAiSearchQuery, getAiSearchQueryInputSchema } from './tools/ai-search-query.js';
 import { closeBrowser } from './fetcher/browser-renderer.js';
 import { listResources, listResourceTemplates, readResource } from './resources/handlers.js';
 import { getResourceStore, setResourceListChangedNotifier } from './resources/store.js';
@@ -74,6 +75,16 @@ const PROMPTS = [
       { name: 'query', description: 'Query string for AI Search', required: true },
       { name: 'wait_ms', description: 'Wait before querying AI Search (ms)', required: false },
       { name: 'mode', description: 'AI Search mode: search or ai_search', required: false },
+    ],
+  },
+  {
+    name: 'ai_search_query',
+    title: 'AI Search Query',
+    description: 'Query the conversation-scoped knowledge base built by fetch()',
+    arguments: [
+      { name: 'query', description: 'Query string to search in the KB', required: true },
+      { name: 'mode', description: 'AI Search mode: search or ai_search', required: false },
+      { name: 'thread_key', description: 'Optional stable thread key override', required: false },
     ],
   },
   {
@@ -286,6 +297,27 @@ function buildFetchAiSearchPrompt(args: Record<string, string>): string {
   ].join('\n');
 }
 
+function buildAiSearchQueryPrompt(args: Record<string, string>): string {
+  const query = args['query'] ?? '';
+  const mode = args['mode'];
+  const threadKey = args['thread_key'];
+
+  const payload: Record<string, unknown> = {
+    query: {
+      query,
+      ...(mode ? { mode } : {}),
+    },
+    ...(threadKey ? { thread_key: threadKey } : {}),
+  };
+
+  return [
+    'Call the `ai_search_query` tool with the following input:',
+    '```json',
+    JSON.stringify(payload, null, 2),
+    '```',
+  ].join('\n');
+}
+
 function buildResourcesTipsPrompt(): string {
   return [
     'Tips for reusing fetched content via MCP resources:',
@@ -365,10 +397,23 @@ Compaction modes:
 Always preserves numbers, dates, names, definitions, and procedures.`,
     inputSchema: getCompactInputSchema(),
   },
+  {
+    name: 'ai_search_query',
+    description: `Query Cloudflare AI Search over the scoped knowledge base built by fetch().
+
+By default, results are scoped to the current conversation/thread (or workspace fallback) based on:
+- options.ai_search.thread_key (if provided), otherwise WEB_FETCH_THREAD_KEY / AI_SEARCH_THREAD_KEY
+- persisted mapping to a stable conversation_id (survives restarts)
+
+Use this for: \"What did I read about X?\" without fetching again.`,
+    inputSchema: getAiSearchQueryInputSchema(),
+  },
 ];
 
 const SERVER_INSTRUCTIONS = [
   'Resources: After fetch/extract, content is cached and accessible via MCP resources.',
+  '',
+  'AI Search: Use `fetch` (auto-indexed when AI_SEARCH_ENABLED=true) to build a scoped KB, then query it with `ai_search_query`.',
   '',
   'To list resources: mcp__web-fetch.list_mcp_resources({})',
   '',
@@ -509,6 +554,21 @@ async function main(): Promise<void> {
               content: {
                 type: 'text',
                 text: buildFetchAiSearchPrompt(resolved),
+              },
+            },
+          ],
+        };
+      }
+      case 'ai_search_query': {
+        const resolved = getArgs(args, ['query']);
+        return {
+          description: 'Query the conversation-scoped knowledge base built by fetch()',
+          messages: [
+            {
+              role: 'user',
+              content: {
+                type: 'text',
+                text: buildAiSearchQueryPrompt(resolved),
               },
             },
           ],
@@ -657,6 +717,36 @@ async function main(): Promise<void> {
           const result = executeCompact({
             input: input as never,
             options,
+          });
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(result, null, 2),
+              },
+            ],
+            isError: !result.success,
+          };
+        }
+
+        case 'ai_search_query': {
+          const argsObject = requireRecord(args, 'arguments');
+          const queryObj = requireRecord(argsObject['query'], 'query');
+          requireString(queryObj['query'], 'query.query');
+
+          const threadKeyRaw = argsObject['thread_key'];
+          let threadKey: string | undefined = undefined;
+          if (threadKeyRaw !== undefined) {
+            if (typeof threadKeyRaw !== 'string') {
+              throw new McpError(ErrorCode.InvalidParams, 'thread_key must be a string');
+            }
+            threadKey = threadKeyRaw.trim() || undefined;
+          }
+
+          const result = await executeAiSearchQuery({
+            query: queryObj as never,
+            thread_key: threadKey,
           });
 
           return {

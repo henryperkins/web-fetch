@@ -13,6 +13,8 @@ import type {
   LLMPacket,
 } from '../types.js';
 import { getConfig } from '../config.js';
+import { AiSearchScopeError, resolveAiSearchScope } from './state.js';
+import type { ScopeResolution } from './state.js';
 
 const DEFAULT_UPLOAD_RETRIES = 3;
 const RETRY_DELAY_MS = 500;
@@ -365,6 +367,44 @@ function buildQueryRequest(options: AiSearchQueryOptions): Record<string, unknow
   return request;
 }
 
+/**
+ * Query AI Search, automatically scoped to the configured conversation/workspace.
+ *
+ * This is the primary entrypoint for "What did I read about X?" style retrieval
+ * without requiring a fetch.
+ */
+export async function queryAiSearchScoped(
+  options: AiSearchQueryOptions,
+  config: Config = getConfig(),
+  scope?: { thread_key?: string },
+): Promise<AiSearchQueryResult> {
+  let resolution: ScopeResolution;
+  try {
+    resolution = await resolveAiSearchScope(config, scope?.thread_key);
+  } catch (err) {
+    const scopeErr = err instanceof AiSearchScopeError ? err : undefined;
+    return {
+      mode: options.mode ?? 'search',
+      request: buildQueryRequest(options),
+      error: {
+        code: scopeErr?.code ?? 'AI_SEARCH_SCOPE_ERROR',
+        message: err instanceof Error ? err.message : 'AI Search scope resolution failed',
+      },
+    };
+  }
+
+  const scopedApplied = applyScopeToQueryOptions(options, resolution.folder_scope_prefix);
+  if (!scopedApplied.ok) {
+    return {
+      mode: options.mode ?? 'search',
+      request: buildQueryRequest(options),
+      error: scopedApplied.error,
+    };
+  }
+
+  return queryAiSearch(scopedApplied.query, config);
+}
+
 async function queryAiSearch(
   options: AiSearchQueryOptions,
   config: Config
@@ -449,6 +489,93 @@ function clampWaitMs(waitMs: number, config: Config): number {
   return Math.min(waitMs, config.aiSearchMaxQueryWaitMs);
 }
 
+type AiSearchFilter = {
+  type: string;
+  key?: string;
+  value?: string | number | boolean;
+  filters?: AiSearchFilter[];
+};
+
+function buildFolderStartsWithComparisons(folderPrefix: string): AiSearchFilter[] {
+  const p = normalizePrefix(folderPrefix);
+  if (!p) return [];
+  // Cloudflare AI Search 'starts with' pattern:
+  // folder > prefix AND folder <= prefix + 'z'
+  // (Example: gt 'customer-a/' and lte 'customer-a/z' for prefix 'customer-a/')
+  return [
+    { type: 'gt', key: 'folder', value: p },
+    { type: 'lte', key: 'folder', value: `${p}z` },
+  ];
+}
+
+function mergeFiltersWithScope(
+  existing: unknown,
+  scopeComparisons: AiSearchFilter[]
+): { ok: true; filters: Record<string, unknown> } | { ok: false; error: { code: string; message: string } } {
+  if (scopeComparisons.length === 0) {
+    return { ok: true, filters: (existing as Record<string, unknown>) ?? {} };
+  }
+
+  if (existing === undefined || existing === null) {
+    return {
+      ok: true,
+      filters: { type: 'and', filters: scopeComparisons } as unknown as Record<string, unknown>,
+    };
+  }
+
+  if (typeof existing !== 'object') {
+    return { ok: false, error: { code: 'AI_SEARCH_UNSUPPORTED_FILTERS', message: 'filters must be an object' } };
+  }
+
+  const ex = existing as AiSearchFilter;
+  if (Object.keys(ex).length === 0) {
+    return {
+      ok: true,
+      filters: { type: 'and', filters: scopeComparisons } as unknown as Record<string, unknown>,
+    };
+  }
+
+  if (ex.type === 'and' && Array.isArray(ex.filters)) {
+    return {
+      ok: true,
+      filters: { ...ex, filters: [...ex.filters, ...scopeComparisons] } as unknown as Record<string, unknown>,
+    };
+  }
+
+  if (ex.type === 'or' && Array.isArray(ex.filters)) {
+    return {
+      ok: true,
+      filters: { type: 'and', filters: [ex, ...scopeComparisons] } as unknown as Record<string, unknown>,
+    };
+  }
+
+  // Single comparison filter
+  if (typeof ex.type === 'string' && typeof ex.key === 'string') {
+    return {
+      ok: true,
+      filters: { type: 'and', filters: [ex, ...scopeComparisons] } as unknown as Record<string, unknown>,
+    };
+  }
+
+  return {
+    ok: false,
+    error: { code: 'AI_SEARCH_UNSUPPORTED_FILTERS', message: 'Unsupported filters shape' },
+  };
+}
+
+function applyScopeToQueryOptions(
+  query: AiSearchQueryOptions,
+  folderScopePrefix: string
+): { ok: true; query: AiSearchQueryOptions } | { ok: false; error: { code: string; message: string } } {
+  const scopeComparisons = buildFolderStartsWithComparisons(folderScopePrefix);
+  if (scopeComparisons.length === 0) return { ok: true, query };
+
+  const merged = mergeFiltersWithScope(query.filters, scopeComparisons);
+  if (!merged.ok) return merged;
+
+  return { ok: true, query: { ...query, filters: merged.filters } };
+}
+
 export async function ingestPacketToAiSearch(
   packet: LLMPacket,
   options: AiSearchOptions,
@@ -488,9 +615,28 @@ export async function ingestPacketToAiSearch(
   }
 
   const maxFileBytes = options.max_file_bytes ?? config.aiSearchMaxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
-  const keyBase = buildKeyBase(packet, options.prefix ?? config.aiSearchR2Prefix ?? '');
+
+  let scope: ScopeResolution;
+  try {
+    scope = await resolveAiSearchScope(config, options.thread_key);
+  } catch (err) {
+    const scopeErr = err instanceof AiSearchScopeError ? err : undefined;
+    return {
+      enabled: true,
+      uploaded: false,
+      error: {
+        code: scopeErr?.code ?? 'AI_SEARCH_SCOPE_ERROR',
+        message: err instanceof Error ? err.message : 'AI Search scope resolution failed',
+        details: scopeErr?.details,
+      },
+    };
+  }
+
+  const effectivePrefix = `${scope.upload_prefix}${normalizePrefix(options.prefix ?? '')}`;
+  const keyBase = buildKeyBase(packet, effectivePrefix);
   const keyPrefix = `${keyBase}/${packet.hashes.content_hash}`;
 
+  // Split content by max bytes
   let parts: string[] = [];
   let totalParts = 1;
   let overheadBytes = byteLength(buildFrontmatter(packet, 1, 1)) + 2;
@@ -528,7 +674,15 @@ export async function ingestPacketToAiSearch(
     const frontmatter = buildFrontmatter(packet, index + 1, totalParts);
     return sum + byteLength(frontmatter) + 2 + byteLength(part);
   }, 0);
+
   const skipIfExists = options.skip_if_exists ?? true;
+
+  const scopedQueryApplied = options.query
+    ? applyScopeToQueryOptions(options.query, scope.folder_scope_prefix)
+    : ({ ok: true, query: undefined } as const);
+
+  const scopedQuery = scopedQueryApplied.ok ? scopedQueryApplied.query : undefined;
+  const scopedQueryError = scopedQueryApplied.ok ? undefined : scopedQueryApplied.error;
 
   try {
     // Check if ALL parts exist (not just first) to handle partial upload recovery
@@ -541,9 +695,16 @@ export async function ingestPacketToAiSearch(
     }
 
     if (allPartsExist) {
-      const query = options.query
-        ? await queryAiSearch(options.query, config)
-        : undefined;
+      const query = scopedQueryError
+        ? {
+            mode: options.query?.mode ?? 'search',
+            request: buildQueryRequest({ ...options.query!, filters: options.query?.filters }),
+            error: scopedQueryError,
+          }
+        : scopedQuery
+          ? await queryAiSearch(scopedQuery, config)
+          : undefined;
+
       return {
         enabled: true,
         uploaded: false,
@@ -569,9 +730,15 @@ export async function ingestPacketToAiSearch(
       await new Promise(resolve => setTimeout(resolve, waitMs));
     }
 
-    const query = options.query
-      ? await queryAiSearch(options.query, config)
-      : undefined;
+    const query = scopedQueryError
+      ? {
+          mode: options.query?.mode ?? 'search',
+          request: buildQueryRequest({ ...options.query!, filters: options.query?.filters }),
+          error: scopedQueryError,
+        }
+      : scopedQuery
+        ? await queryAiSearch(scopedQuery, config)
+        : undefined;
 
     return {
       enabled: true,

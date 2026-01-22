@@ -32,6 +32,9 @@ const PROMPT_COMPLETIONS: Record<string, Record<string, string[]>> = {
         mode: ['search', 'ai_search'],
         wait_ms: ['0', '500', '1000', '2000'],
     },
+    ai_search_query: {
+        mode: ['search', 'ai_search'],
+    },
 };
 
 export type CompletionParams = {

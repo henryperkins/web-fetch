@@ -2,7 +2,10 @@
  * Configuration management for web-fetch-mcp
  */
 
-import type { Config } from './types.js';
+import * as os from 'node:os';
+import * as path from 'node:path';
+
+import type { AiSearchScope, Config } from './types.js';
 
 function parseBoolean(value: string | undefined, defaultValue: boolean): boolean {
   if (value === undefined) return defaultValue;
@@ -26,6 +29,15 @@ function parseStringArray(value: string | undefined): string[] {
   return value.split(',').map(s => s.trim()).filter(s => s.length > 0);
 }
 
+function parseAiSearchScope(value: string | undefined, defaultValue: AiSearchScope): AiSearchScope {
+  if (!value) return defaultValue;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'conversation' || normalized === 'thread') return 'conversation';
+  if (normalized === 'workspace' || normalized === 'project' || normalized === 'cwd') return 'workspace';
+  if (normalized === 'global') return 'global';
+  return defaultValue;
+}
+
 export function loadConfig(): Config {
   return {
     maxBytes: parseNumber(process.env['MAX_BYTES'], 10 * 1024 * 1024), // 10MB
@@ -44,6 +56,19 @@ export function loadConfig(): Config {
     renderTimeoutMs: parseNumber(process.env['RENDER_TIMEOUT_MS'], 60000),
     userAgent: process.env['USER_AGENT'] || 'web-fetch-mcp/1.0 (+https://github.com/example/web-fetch-mcp)',
     aiSearchEnabled: parseBoolean(process.env['AI_SEARCH_ENABLED'], false),
+    aiSearchScope: parseAiSearchScope(
+      process.env['AI_SEARCH_SCOPE'] ?? process.env['WEB_FETCH_SESSION_SCOPE'],
+      'conversation'
+    ),
+    aiSearchThreadKey: process.env['WEB_FETCH_THREAD_KEY']
+      ?? process.env['AI_SEARCH_THREAD_KEY']
+      ?? process.env['MCP_THREAD_KEY'],
+    aiSearchStateDir: process.env['AI_SEARCH_STATE_DIR']
+      ?? process.env['WEB_FETCH_SESSION_DIR']
+      ?? path.join(os.homedir(), '.config', 'web-fetch-mcp'),
+    aiSearchRequireThreadKey: parseBoolean(process.env['AI_SEARCH_REQUIRE_THREAD_KEY'], false),
+    aiSearchWorkspaceRoot: process.env['AI_SEARCH_WORKSPACE_ROOT']
+      ?? process.env['WEB_FETCH_WORKSPACE_ROOT'],
     aiSearchAccountId: process.env['CF_ACCOUNT_ID'],
     aiSearchName: process.env['CF_AI_SEARCH_NAME'],
     aiSearchApiToken: process.env['CF_AI_SEARCH_API_TOKEN'],
@@ -124,6 +149,15 @@ export function validateConfig(config: Config): string[] {
     }
     if (!config.aiSearchR2SecretAccessKey) {
       errors.push('CF_R2_SECRET_ACCESS_KEY is required when AI_SEARCH_ENABLED=true');
+    }
+
+    if (config.aiSearchScope === 'conversation' &&
+      config.aiSearchRequireThreadKey &&
+      !config.aiSearchThreadKey
+    ) {
+      errors.push(
+        'WEB_FETCH_THREAD_KEY (or AI_SEARCH_THREAD_KEY) is required when AI_SEARCH_SCOPE=conversation and AI_SEARCH_REQUIRE_THREAD_KEY=true'
+      );
     }
   }
 
