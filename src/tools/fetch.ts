@@ -224,6 +224,7 @@ export async function executeFetch(input: FetchToolInput): Promise<FetchToolOutp
     extraction,
     format,
   } = options;
+  const wantsScreenshot = options.render?.screenshot === true;
 
   try {
     let rawResult: RawFetchResult | null = null;
@@ -376,6 +377,13 @@ export async function executeFetch(input: FetchToolInput): Promise<FetchToolOutp
             usedRender = true;
           }
         }
+      }
+    }
+
+    if (wantsScreenshot && !screenshot && config.playwrightEnabled) {
+      const renderAttempt = await tryRender();
+      if (renderAttempt.success) {
+        screenshot = renderAttempt.screenshot;
       }
     }
 

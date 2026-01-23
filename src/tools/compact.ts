@@ -65,24 +65,17 @@ export function getCompactInputSchema(): object {
       input: {
         type: 'object',
         description: 'LLMPacket or ChunkSet to compact',
-        oneOf: [
-          {
-            properties: {
-              source_id: { type: 'string' },
-              content: { type: 'string' },
-              outline: { type: 'array' },
-            },
-            required: ['source_id', 'content'],
-          },
-          {
-            properties: {
-              source_id: { type: 'string' },
-              chunks: { type: 'array' },
-              original_url: { type: 'string' },
-              key_blocks: { type: 'array' },
-            },
-            required: ['source_id', 'chunks'],
-          },
+        properties: {
+          source_id: { type: 'string' },
+          content: { type: 'string' },
+          outline: { type: 'array' },
+          chunks: { type: 'array' },
+          original_url: { type: 'string' },
+          key_blocks: { type: 'array' },
+        },
+        anyOf: [
+          { required: ['source_id', 'content'] },
+          { required: ['source_id', 'chunks'] },
         ],
       },
       options: {

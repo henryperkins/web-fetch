@@ -16,6 +16,14 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
     reason: 'Attempts to override previous instructions',
   },
   {
+    pattern: /\bdisregard\s+(all\s+)?(previous|prior|above|earlier)\s+(instructions?|prompts?|rules?|guidelines?)\b/i,
+    reason: 'Attempts to override previous instructions',
+  },
+  {
+    pattern: /\boverride\s+(the\s+)?(system|previous|prior)?\s*(prompt|instructions?|rules?)\b/i,
+    reason: 'Attempts to override system instructions',
+  },
+  {
     pattern: /\bforget\s+(everything|all|what)\s+(you\s+)?(?:know|learned|were\s+told)\b/i,
     reason: 'Attempts to clear LLM context',
   },
@@ -86,8 +94,16 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
     reason: 'Fake message delimiters',
   },
   {
+    pattern: /<<\s*SYS\s*>>|<<\/\s*SYS\s*>>/i,
+    reason: 'Fake system prompt delimiters',
+  },
+  {
     pattern: /###\s*(System|Assistant|User|Instruction)\s*:?\s*###/i,
     reason: 'Fake message delimiters',
+  },
+  {
+    pattern: /^#{1,6}\s*(System|Assistant|User)\s*:?\s*$/im,
+    reason: 'Fake role heading markers',
   },
   {
     pattern: /Human:\s*|Assistant:\s*|System:\s*/,
@@ -108,6 +124,10 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   {
     pattern: /<thinking>|<\/thinking>|<answer>|<\/answer>/i,
     reason: 'XML tag injection for structured output',
+  },
+  {
+    pattern: /<\/?(system|assistant|user)\s*>/i,
+    reason: 'XML tag injection for chat roles',
   },
 
   // Indirect prompt injection via instructions
@@ -139,6 +159,13 @@ export interface DetectionResult {
   detections: UnsafeInstruction[];
 }
 
+function buildInjectionRegex(pattern: RegExp): RegExp {
+  let flags = pattern.flags;
+  if (!flags.includes('g')) flags += 'g';
+  if (!flags.includes('i')) flags += 'i';
+  return new RegExp(pattern.source, flags);
+}
+
 /**
  * Detect prompt injection patterns in text
  */
@@ -147,7 +174,7 @@ export function detectInjections(text: string): DetectionResult {
   const seen = new Set<string>();
 
   for (const { pattern, reason } of INJECTION_PATTERNS) {
-    const matches = text.matchAll(new RegExp(pattern, 'gi'));
+    const matches = text.matchAll(buildInjectionRegex(pattern));
 
     for (const match of matches) {
       const matchText = match[0];
@@ -191,7 +218,7 @@ export function sanitizeInjections(text: string): { text: string; modified: bool
   let result = text;
 
   for (const { pattern } of INJECTION_PATTERNS) {
-    const newResult = result.replace(new RegExp(pattern, 'gi'), (match) => {
+    const newResult = result.replace(buildInjectionRegex(pattern), (match) => {
       modified = true;
       return `[POTENTIAL_INJECTION: ${match}]`;
     });

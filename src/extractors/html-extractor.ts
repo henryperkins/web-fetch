@@ -56,6 +56,77 @@ turndownService.addRule('tableCells', {
   },
 });
 
+function normalizeTableCellText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().replace(/\|/g, '\\|');
+}
+
+function tableHasHeadingRow(table: Element): boolean {
+  const rows = Array.from(table.querySelectorAll('tr'))
+    .filter(row => row.closest('table') === table);
+  const firstRow = rows[0];
+  if (!firstRow) return false;
+
+  const cells = Array.from(firstRow.querySelectorAll('th, td'))
+    .filter(cell => cell.closest('table') === table);
+  if (cells.length === 0) return false;
+
+  const allTh = cells.every(cell => cell.tagName === 'TH');
+  if (!allTh) return false;
+
+  const parent = firstRow.parentElement;
+  if (!parent) return false;
+  const parentName = parent.tagName;
+  if (parentName === 'THEAD' || parentName === 'TABLE') return true;
+
+  if (parentName === 'TBODY') {
+    const prev = parent.previousElementSibling;
+    if (!prev) return true;
+    if (prev.tagName === 'THEAD' && (prev.textContent || '').trim() === '') return true;
+  }
+
+  return false;
+}
+
+function tableToMarkdown(table: Element): string {
+  const rows = Array.from(table.querySelectorAll('tr'))
+    .filter(row => row.closest('table') === table);
+  if (rows.length === 0) return '';
+
+  const rowValues = rows.map(row => {
+    const cells = Array.from(row.querySelectorAll('th, td'))
+      .filter(cell => cell.closest('table') === table);
+    return cells.map(cell => normalizeTableCellText(cell.textContent || ''));
+  });
+
+  const columnCount = rowValues.reduce((max, row) => Math.max(max, row.length), 0);
+  if (columnCount === 0) return '';
+
+  const normalized = rowValues.map(row => {
+    const values = row.slice(0, columnCount);
+    while (values.length < columnCount) {
+      values.push('');
+    }
+    return values;
+  });
+
+  const header = normalized[0] ?? new Array(columnCount).fill('');
+  const separator = new Array(columnCount).fill('---');
+  const body = normalized.slice(1);
+
+  const lines = [
+    `| ${header.join(' | ')} |`,
+    `| ${separator.join(' | ')} |`,
+    ...body.map(row => `| ${row.join(' | ')} |`),
+  ];
+
+  return `\n\n${lines.join('\n')}\n\n`;
+}
+
+turndownService.addRule('tableWithoutHeading', {
+  filter: (node) => node.nodeName === 'TABLE' && !tableHasHeadingRow(node),
+  replacement: (_content, node) => tableToMarkdown(node),
+});
+
 export interface HtmlExtractionResult {
   success: boolean;
   content?: ExtractedContent;

@@ -24,6 +24,11 @@ interface SectionScore {
   reasons: string[];
 }
 
+interface QueryTerm {
+  base: string;
+  variants: string[];
+}
+
 /**
  * Compact content to fit within token limit
  */
@@ -353,23 +358,48 @@ function questionFocusedCompaction(
   }
 
   // Extract key terms from question
-  const questionTerms = extractQueryTerms(question);
+  const questionTerms = buildQueryTerms(question);
+  if (questionTerms.length === 0) {
+    const fallback = salienceCompaction(content, chunks, maxTokens, preserve, keyBlocks);
+    fallback.warnings.push('No meaningful question terms found, falling back to salience compaction');
+    return fallback;
+  }
 
   // Score sentences by relevance to question
   const sentences = splitIntoSentences(content);
-  const scoredSentences = sentences.map((sentence, idx) => ({
-    index: idx,
-    text: sentence,
-    score: scoreRelevance(sentence, questionTerms, preserve),
-    reasons: [],
-  }));
+  const termMatches = sentences.map(sentence => countTermMatches(sentence, questionTerms));
+  const totalMatches = termMatches.reduce((sum, count) => sum + count, 0);
+
+  if (totalMatches === 0) {
+    const fallback = salienceCompaction(content, chunks, maxTokens, preserve, keyBlocks);
+    fallback.warnings.push('No sentence matched question terms, falling back to salience compaction');
+    return fallback;
+  }
+
+  const scoredSentences = sentences.map((sentence, idx) => {
+    const neighborMatches = (termMatches[idx - 1] ?? 0) + (termMatches[idx + 1] ?? 0);
+    return {
+      index: idx,
+      text: sentence,
+      score: scoreRelevance(sentence, preserve, termMatches[idx] ?? 0, neighborMatches),
+      reasons: [],
+      matchCount: termMatches[idx] ?? 0,
+    };
+  });
 
   // Sort by relevance
-  scoredSentences.sort((a, b) => b.score - a.score);
+  scoredSentences.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if ((b.matchCount ?? 0) !== (a.matchCount ?? 0)) {
+      return (b.matchCount ?? 0) - (a.matchCount ?? 0);
+    }
+    return a.index - b.index;
+  });
 
   // Select most relevant sentences
   const includedSentences: SectionScore[] = [];
   let currentTokens = 0;
+  const includedIndexes = new Set<number>();
 
   for (const sentence of scoredSentences) {
     const sentenceTokens = estimateTokens(sentence.text);
@@ -377,6 +407,32 @@ function questionFocusedCompaction(
     if (currentTokens + sentenceTokens <= maxTokens) {
       includedSentences.push(sentence);
       currentTokens += sentenceTokens;
+      includedIndexes.add(sentence.index);
+    }
+  }
+
+  const minTokens = Math.floor(maxTokens * 0.7);
+  if (currentTokens < minTokens) {
+    const fallbackCandidates = sentences.map((sentence, idx) => ({
+      index: idx,
+      text: sentence,
+      score: scoreSentenceSalience(sentence, preserve),
+      reasons: [],
+    }));
+    fallbackCandidates.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return a.index - b.index;
+    });
+
+    for (const sentence of fallbackCandidates) {
+      if (includedIndexes.has(sentence.index)) continue;
+      const sentenceTokens = estimateTokens(sentence.text);
+      if (currentTokens + sentenceTokens <= maxTokens) {
+        includedSentences.push(sentence);
+        currentTokens += sentenceTokens;
+        includedIndexes.add(sentence.index);
+      }
+      if (currentTokens >= minTokens) break;
     }
   }
 
@@ -646,20 +702,99 @@ function extractKeyPoints(text: string, preserve: PreserveType[], keyBlocks: Key
 
 function extractQuotes(content: string, keyBlocks: KeyBlock[]): CompactedKeyPoint[] {
   const quotes: CompactedKeyPoint[] = [];
+  const seen = new Set<string>();
 
-  // Find quoted text
-  const quoteMatches = content.matchAll(/"([^"]{20,200})"/g);
-  for (const match of quoteMatches) {
-    if (match[1]) {
-      const quoted = `"${match[1]}"`;
-      quotes.push({
-        text: quoted,
-        citation: findCitationForText(match[1], keyBlocks),
-      });
+  const sources = keyBlocks.length > 0
+    ? keyBlocks.filter(block => block.text && block.kind !== 'code' && block.kind !== 'table' && block.kind !== 'meta')
+    : [{
+      block_id: '',
+      kind: 'paragraph',
+      text: content,
+      char_len: content.length,
+    } as KeyBlock];
+
+  for (const source of sources) {
+    const cleaned = stripInlineCode(stripCodeBlocks(source.text));
+    if (!cleaned.trim()) continue;
+
+    for (const line of cleaned.split('\n')) {
+      if (isJsonLikeLine(line)) continue;
+      const quoteMatches = line.matchAll(/"([^"]{20,200})"/g);
+      for (const match of quoteMatches) {
+        const raw = match[1]?.trim();
+        if (!raw || !isLikelyQuote(raw)) continue;
+        const normalized = normalizeSentence(raw);
+        if (normalized && seen.has(normalized)) continue;
+        if (normalized) seen.add(normalized);
+        quotes.push({
+          text: `"${raw}"`,
+          citation: findCitationForText(raw, keyBlocks),
+        });
+        if (quotes.length >= 5) {
+          return quotes;
+        }
+      }
     }
   }
 
-  return quotes.slice(0, 5);
+  return quotes;
+}
+
+function stripInlineCode(text: string): string {
+  return text.replace(/`[^`]*`/g, '');
+}
+
+function stripCodeBlocks(text: string): string {
+  const lines = text.split('\n');
+  const output: string[] = [];
+  let inCodeBlock = false;
+  let fenceChar = '';
+  let fenceLength = 0;
+
+  for (const line of lines) {
+    const fenceMatch = line.match(/^\s*(```+|~~~+)/);
+    if (fenceMatch) {
+      const fenceMarker = fenceMatch[1]!;
+      const markerChar = fenceMarker[0]!;
+      if (!inCodeBlock) {
+        inCodeBlock = true;
+        fenceChar = markerChar;
+        fenceLength = fenceMarker.length;
+      } else if (markerChar === fenceChar && fenceMarker.length >= fenceLength) {
+        inCodeBlock = false;
+        fenceChar = '';
+        fenceLength = 0;
+      }
+      continue;
+    }
+
+    if (inCodeBlock) continue;
+    output.push(line);
+  }
+
+  return output.join('\n');
+}
+
+function isJsonLikeLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  if (/^["'][^"']+["']\s*:/.test(trimmed)) return true;
+  if (trimmed.startsWith('{') && /["'][^"']+["']\s*:/.test(trimmed)) return true;
+  return false;
+}
+
+function isLikelyQuote(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  if (words.length < 4) return false;
+  const letters = (trimmed.match(/[A-Za-z]/g) || []).length;
+  if (letters < 10) return false;
+  const symbolCount = (trimmed.match(/[{}\[\]<>:=;]/g) || []).length;
+  if (symbolCount / trimmed.length > 0.2) return false;
+  if (/\\[nrtu]/.test(trimmed)) return false;
+  if (/https?:\/\//i.test(trimmed)) return false;
+  return true;
 }
 
 function summarizeSection(section: string, maxTokens: number, preserve: PreserveType[]): string {
@@ -779,8 +914,15 @@ function formatSummary(sentences: string[]): string {
   return lines.join('\n\n');
 }
 
+function buildQueryTerms(question: string): QueryTerm[] {
+  const baseTerms = extractQueryTerms(question);
+  return baseTerms.map(term => ({
+    base: term,
+    variants: expandTermVariants(term),
+  }));
+}
+
 function extractQueryTerms(question: string): string[] {
-  // Remove common words and extract meaningful terms
   const stopWords = new Set([
     'what', 'how', 'why', 'when', 'where', 'who', 'which',
     'is', 'are', 'was', 'were', 'be', 'been', 'being',
@@ -792,22 +934,100 @@ function extractQueryTerms(question: string): string[] {
     'i', 'me', 'my', 'we', 'our', 'you', 'your',
   ]);
 
-  return question
-    .toLowerCase()
-    .replace(/[?.,!;:'"]/g, '')
-    .split(/\s+/)
-    .filter(word => word.length > 2 && !stopWords.has(word));
+  const terms = new Set<string>();
+  const tokens = question.matchAll(/[A-Za-z0-9]+/g);
+
+  for (const match of tokens) {
+    const raw = match[0] ?? '';
+    if (!raw) continue;
+    const cleaned = raw.toLowerCase();
+    if (stopWords.has(cleaned)) continue;
+
+    const isShort = cleaned.length <= 2;
+    const keepShort = isShort && (/[A-Z]/.test(raw) || /\d/.test(raw));
+    if (isShort && !keepShort) continue;
+
+    terms.add(cleaned);
+  }
+
+  return [...terms];
 }
 
-function scoreRelevance(sentence: string, queryTerms: string[], preserve: PreserveType[]): number {
-  let score = scoreSentenceSalience(sentence, preserve);
-  const lowerSentence = sentence.toLowerCase();
+function expandTermVariants(term: string): string[] {
+  const variants = new Set<string>([term]);
 
-  // Boost for query term matches
-  for (const term of queryTerms) {
-    if (lowerSentence.includes(term)) {
-      score += 3;
+  const stemmed = stemTerm(term);
+  if (stemmed && stemmed !== term) variants.add(stemmed);
+
+  if (term.endsWith('ies') && term.length > 4) {
+    variants.add(term.slice(0, -3) + 'y');
+  }
+
+  return [...variants].filter(v => v.length > 1);
+}
+
+function stemTerm(term: string): string {
+  if (term.length <= 4) return term;
+
+  const suffixes = ['ments', 'ment', 'tions', 'tion', 'ations', 'ation', 'ings', 'ing', 'ers', 'er', 'ed', 'es', 's'];
+
+  if (term.endsWith('ies') && term.length > 4) {
+    return term.slice(0, -3) + 'y';
+  }
+
+  for (const suffix of suffixes) {
+    if (suffix === 's' && term.length <= 4) continue;
+    if (term.endsWith(suffix) && term.length > suffix.length + 2) {
+      return term.slice(0, -suffix.length);
     }
+  }
+
+  return term;
+}
+
+function tokenizeWords(text: string): string[] {
+  return text.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+}
+
+function countTermMatches(sentence: string, terms: QueryTerm[]): number {
+  if (terms.length === 0) return 0;
+  const tokens = tokenizeWords(sentence);
+  if (tokens.length === 0) return 0;
+
+  const tokenSet = new Set(tokens);
+  let matches = 0;
+
+  for (const term of terms) {
+    const matched = term.variants.some(variant => {
+      if (!variant) return false;
+      if (tokenSet.has(variant)) return true;
+      if (variant.length >= 4) {
+        return tokens.some(token => token.startsWith(variant));
+      }
+      return false;
+    });
+    if (matched) matches++;
+  }
+
+  return matches;
+}
+
+function scoreRelevance(
+  sentence: string,
+  preserve: PreserveType[],
+  termMatches: number,
+  neighborMatches: number
+): number {
+  let score = scoreSentenceSalience(sentence, preserve);
+  const trimmed = sentence.trim();
+
+  if (termMatches > 0) {
+    score += termMatches * 3;
+    if (isHeadingLine(trimmed)) score += 2;
+  }
+
+  if (neighborMatches > 0) {
+    score += Math.min(2, neighborMatches);
   }
 
   return score;

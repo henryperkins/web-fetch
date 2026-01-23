@@ -198,4 +198,28 @@ The price is $10 for early access.`,
     expect(result.compacted?.compacted.summary.length).toBeGreaterThan(0);
     expect(result.compacted?.compacted.warnings.length).toBeGreaterThan(0);
   });
+
+  it('should avoid JSON-like quotes in important_quotes', () => {
+    const packet = {
+      source_id: 'source-8',
+      content: [
+        'Here is a quote: "We ship fast and safe for users every single day."',
+        '',
+        '"config": "This string should not be treated as a quote in summaries."',
+      ].join('\n'),
+    } as LLMPacket;
+
+    const result = executeCompact({
+      input: packet,
+      options: {
+        max_tokens: 120,
+        mode: 'salience',
+      },
+    });
+
+    expect(result.success).toBe(true);
+    const quotes = result.compacted?.compacted.important_quotes ?? [];
+    expect(quotes.some(q => q.text.includes('We ship fast and safe'))).toBe(true);
+    expect(quotes.some(q => q.text.includes('should not be treated as a quote'))).toBe(false);
+  });
 });

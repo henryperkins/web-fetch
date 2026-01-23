@@ -6,8 +6,10 @@
  */
 
 // Average characters per token for English text
-// This is a conservative estimate that tends to slightly overcount
+// Conservative estimate that tends to slightly overcount
 const CHARS_PER_TOKEN = 3.5;
+// Average words per token (used to guard against many short words)
+const WORDS_PER_TOKEN = 0.75;
 
 // Adjustments for different content types
 const CODE_CHARS_PER_TOKEN = 3.0; // Code tends to tokenize less efficiently
@@ -35,9 +37,12 @@ export function estimateTokens(text: string): number {
   // Estimate tokens
   const charsPerToken = isCode ? CODE_CHARS_PER_TOKEN : CHARS_PER_TOKEN;
   const regularTokens = Math.ceil(nonCjkText.length / charsPerToken);
+  const wordCount = nonCjkText.split(/\s+/).filter(word => word.length > 0).length;
+  const wordTokens = Math.ceil(wordCount / WORDS_PER_TOKEN);
+  const nonCjkTokens = Math.max(regularTokens, wordTokens);
   const cjkTokens = Math.ceil(cjkCount / CJK_CHARS_PER_TOKEN);
 
-  return regularTokens + cjkTokens;
+  return nonCjkTokens + cjkTokens;
 }
 
 /**
