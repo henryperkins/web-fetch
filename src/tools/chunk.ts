@@ -34,6 +34,7 @@ export function executeChunk(input: ChunkToolInput): ChunkToolOutput {
       max_tokens: options.max_tokens ?? config.defaultMaxTokens,
       margin_ratio: options.margin_ratio ?? config.chunkMarginRatio,
       strategy: options.strategy ?? 'headings_first',
+      overlap_tokens: options.overlap_tokens,
     };
 
     const chunks = chunkContent(packet, chunkOptions);
@@ -81,6 +82,10 @@ export function getChunkInputSchema(): object {
             type: 'number',
             description: 'Safety margin ratio (0-0.5)',
             default: 0.10,
+          },
+          overlap_tokens: {
+            type: 'number',
+            description: 'Approximate token overlap between adjacent chunks',
           },
           strategy: {
             type: 'string',

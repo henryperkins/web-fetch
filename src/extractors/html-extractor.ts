@@ -10,7 +10,14 @@ import { Readability } from '@mozilla/readability';
 import TurndownService from 'turndown';
 import { gfm } from 'turndown-plugin-gfm';
 import { sanitizeDOM, detectPaywall } from '../security/content-sanitizer.js';
-import type { ExtractedContent, ExtractionOptions } from '../types.js';
+import type { ExtractedContent } from '../types.js';
+
+interface ExtractionOptions {
+  prefer_readability?: boolean;
+  keep_tables?: boolean;
+  keep_code_blocks?: boolean;
+  remove_selectors?: string[];
+}
 
 // Configure Turndown
 const turndownService = new TurndownService({
@@ -237,9 +244,9 @@ export function extractHtml(
       if (article) {
         readabilityContent = {
           title: article.title || title,
-          content: article.content,
-          textContent: article.textContent,
-          excerpt: article.excerpt,
+          content: article.content ?? '',
+          textContent: article.textContent ?? '',
+          excerpt: article.excerpt ?? '',
           byline: article.byline || author,
           siteName: article.siteName || siteName,
           lang: article.lang || lang,

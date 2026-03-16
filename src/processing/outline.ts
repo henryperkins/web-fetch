@@ -13,9 +13,15 @@ interface HeadingMatch {
   position: number;
 }
 
+const ZERO_WIDTH_REGEX = /[\u200B-\u200D\u2060\uFEFF]/g;
+
 function getFenceMarker(line: string): string | null {
   const match = line.match(/^\s*(```+|~~~+)/);
   return match?.[1] ?? null;
+}
+
+function normalizeHeadingText(text: string): string {
+  return text.replace(ZERO_WIDTH_REGEX, '').trim();
 }
 
 function extractHeadings(markdown: string): HeadingMatch[] {
@@ -46,9 +52,14 @@ function extractHeadings(markdown: string): HeadingMatch[] {
     if (!inCodeBlock) {
       const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
       if (headingMatch) {
+        const cleanedText = normalizeHeadingText(headingMatch[2]!.trim());
+        if (!cleanedText) {
+          position += line.length + 1;
+          continue;
+        }
         headings.push({
           level: headingMatch[1]!.length,
-          text: headingMatch[2]!.trim(),
+          text: cleanedText,
           position,
         });
       }
@@ -100,18 +111,22 @@ export function generateOutlineFromHeadings(
 
   for (const heading of headings) {
     const { level, text } = heading;
+    const cleanedText = normalizeHeadingText(text);
+    if (!cleanedText) {
+      continue;
+    }
 
     // Update path stack
     while (pathStack.length >= level) {
       pathStack.pop();
     }
-    pathStack.push(text);
+    pathStack.push(cleanedText);
 
     const path = pathStack.join(' > ');
 
     outline.push({
       level,
-      text,
+      text: cleanedText,
       path,
     });
   }

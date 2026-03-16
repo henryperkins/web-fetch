@@ -43,20 +43,29 @@ export function chunkContent(
     strategy = 'headings_first',
   } = options;
 
+  const overlapTokens = Math.max(0, Math.floor(options.overlap_tokens ?? 0));
   const effectiveMaxTokens = Math.floor(max_tokens * (1 - margin_ratio));
+  const safeOverlapTokens = Math.min(overlapTokens, Math.max(0, effectiveMaxTokens - 1));
+  const chunkTokenBudget = Math.max(1, effectiveMaxTokens - safeOverlapTokens);
   const content = packet.content;
 
   const blocks = buildBlocksFromKeyBlocks(packet);
-  if (blocks.length > 0) {
+  const blocksTextLen = blocks.reduce((sum, b) => sum + b.text.length, 0);
+  const contentLen = content.length;
+  if (blocks.length > 0 && blocksTextLen >= contentLen * 0.8) {
     const chunkSet = chunkBlocks(
       packet.source_id,
       blocks,
       max_tokens,
-      effectiveMaxTokens,
+      chunkTokenBudget,
       strategy,
     );
+    const overlappedChunks = applyOverlap(chunkSet.chunks, safeOverlapTokens, effectiveMaxTokens);
     return {
       ...chunkSet,
+      total_chunks: overlappedChunks.length,
+      total_est_tokens: overlappedChunks.reduce((sum, c) => sum + c.est_tokens, 0),
+      chunks: overlappedChunks,
       original_url: packet.original_url,
       key_blocks: packet.key_blocks,
     };
@@ -86,7 +95,7 @@ export function chunkContent(
     const chunkTokens = estimateTokens(chunkText);
 
     // Check if we need to split here
-    if (chunkTokens > effectiveMaxTokens) {
+    if (chunkTokens > chunkTokenBudget) {
       // Current chunk is too large, split at previous boundary
       if (i > 0 && boundary.position > currentChunkStart) {
         const splitText = content.substring(currentChunkStart, boundary.position).trim();
@@ -108,7 +117,7 @@ export function chunkContent(
         // Single section is too large, force split within it
         const forceSplitChunks = forceSplitContent(
           chunkText,
-          effectiveMaxTokens,
+          chunkTokenBudget,
           packet.source_id,
           chunkIndex,
           currentHeadingsPath,
@@ -128,10 +137,10 @@ export function chunkContent(
       // Check if it needs splitting
       const remainingTokens = estimateTokens(remainingText);
 
-      if (remainingTokens > effectiveMaxTokens) {
+      if (remainingTokens > chunkTokenBudget) {
         const forceSplitChunks = forceSplitContent(
           remainingText,
-          effectiveMaxTokens,
+          chunkTokenBudget,
           packet.source_id,
           chunkIndex,
           currentHeadingsPath,
@@ -149,19 +158,20 @@ export function chunkContent(
   }
 
   // Merge small chunks if possible
-  const mergedChunks = mergeSmallChunks(chunks, effectiveMaxTokens);
+  const mergedChunks = mergeSmallChunks(chunks, chunkTokenBudget);
+  const overlappedChunks = applyOverlap(mergedChunks, safeOverlapTokens, effectiveMaxTokens);
 
   // Calculate totals
-  const totalEstTokens = mergedChunks.reduce((sum, c) => sum + c.est_tokens, 0);
+  const totalEstTokens = overlappedChunks.reduce((sum, c) => sum + c.est_tokens, 0);
 
   return {
     source_id: packet.source_id,
     original_url: packet.original_url,
     key_blocks: packet.key_blocks,
     max_tokens,
-    total_chunks: mergedChunks.length,
+    total_chunks: overlappedChunks.length,
     total_est_tokens: totalEstTokens,
-    chunks: mergedChunks,
+    chunks: overlappedChunks,
   };
 }
 
@@ -404,6 +414,43 @@ function splitLargeBlock(block: ContentBlock, maxTokens: number): string[] {
   }
 }
 
+function findSentenceBoundary(text: string): number {
+  // Match sentence-ending punctuation followed by whitespace
+  const regex = /[.!?]["')\]]?\s+/g;
+  let lastBoundary = -1;
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(text)) !== null) {
+    lastBoundary = match.index + match[0].length;
+  }
+
+  if (lastBoundary !== -1) {
+    return lastBoundary;
+  }
+
+  // Also check for sentence-ending punctuation at or near end of text
+  // (no trailing whitespace required)
+  const trimmed = text.replace(/\s+$/, '');
+  if (trimmed) {
+    // Look for the last sentence boundary in the text
+    const endRegex = /[.!?]["')\]]?/g;
+    let lastEnd = -1;
+    while ((match = endRegex.exec(trimmed)) !== null) {
+      const pos = match.index + match[0].length;
+      // Only count if followed by whitespace, end of text, or uppercase letter
+      const nextChar = trimmed[pos];
+      if (!nextChar || /\s/.test(nextChar) || /[A-Z]/.test(nextChar)) {
+        lastEnd = pos;
+      }
+    }
+    if (lastEnd > 0) {
+      return lastEnd;
+    }
+  }
+
+  return -1;
+}
+
 function splitTextByTokens(content: string, maxTokens: number): string[] {
   const chunks: string[] = [];
   let remaining = content;
@@ -421,15 +468,15 @@ function splitTextByTokens(content: string, maxTokens: number): string[] {
     let splitPoint = Math.min(estimatedChars, remaining.length);
 
     const paragraphEnd = remaining.lastIndexOf('\n\n', splitPoint);
-    if (paragraphEnd > splitPoint * 0.7) {
+    if (paragraphEnd > splitPoint * 0.5) {
       splitPoint = paragraphEnd;
     } else {
-      const sentenceEnd = remaining.substring(0, splitPoint).search(/[.!?]\s+[A-Z][^.!?]*$/);
-      if (sentenceEnd > splitPoint * 0.7) {
-        splitPoint = sentenceEnd + 1;
+      const sentenceEnd = findSentenceBoundary(remaining.substring(0, splitPoint));
+      if (sentenceEnd > splitPoint * 0.5) {
+        splitPoint = sentenceEnd;
       } else {
         const lineEnd = remaining.lastIndexOf('\n', splitPoint);
-        if (lineEnd > splitPoint * 0.8) {
+        if (lineEnd > splitPoint * 0.5) {
           splitPoint = lineEnd;
         }
       }
@@ -653,6 +700,198 @@ function forceSplitContent(
   }
 
   return chunks;
+}
+
+function isHeadingLine(line: string): boolean {
+  return /^#{1,6}\s+/.test(line);
+}
+
+function isListLine(line: string): boolean {
+  return isListItem(line);
+}
+
+function splitParagraphIntoSentences(paragraph: string): string[] {
+  const sentences = paragraph
+    .split(/(?<=[.!?])\s+/)
+    .map(sentence => sentence.trim())
+    .filter(sentence => sentence.length > 0);
+
+  if (!/[.!?]["')\]]?$/.test(paragraph.trim())) {
+    sentences.pop();
+  }
+
+  return sentences;
+}
+
+function splitIntoOverlapSentences(text: string): string[] {
+  const sentences: string[] = [];
+  const lines = text.split('\n');
+  let paragraphLines: string[] = [];
+  let inCodeBlock = false;
+  let fenceChar = '';
+  let fenceLength = 0;
+  let codeLines: string[] = [];
+
+  const flushParagraph = (): void => {
+    if (paragraphLines.length === 0) return;
+    const paragraph = paragraphLines.join(' ').replace(/\s+/g, ' ').trim();
+    if (paragraph) {
+      sentences.push(...splitParagraphIntoSentences(paragraph));
+    }
+    paragraphLines = [];
+  };
+
+  const flushCodeBlock = (): void => {
+    if (codeLines.length === 0) return;
+    sentences.push(codeLines.join('\n').trim());
+    codeLines = [];
+  };
+
+  for (const line of lines) {
+    const fenceMatch = line.match(/^\s*(```+|~~~+)/);
+    if (fenceMatch) {
+      const fenceMarker = fenceMatch[1]!;
+      const markerChar = fenceMarker[0]!;
+      if (!inCodeBlock) {
+        flushParagraph();
+        inCodeBlock = true;
+        fenceChar = markerChar;
+        fenceLength = fenceMarker.length;
+        codeLines = [line];
+      } else if (markerChar === fenceChar && fenceMarker.length >= fenceLength) {
+        codeLines.push(line);
+        inCodeBlock = false;
+        fenceChar = '';
+        fenceLength = 0;
+        flushCodeBlock();
+      } else {
+        codeLines.push(line);
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      codeLines.push(line);
+      continue;
+    }
+
+    const trimmed = line.trim();
+    if (!trimmed) {
+      flushParagraph();
+      continue;
+    }
+
+    if (isHeadingLine(trimmed) || isListLine(trimmed)) {
+      flushParagraph();
+      sentences.push(trimmed);
+      continue;
+    }
+
+    paragraphLines.push(trimmed);
+  }
+
+  flushParagraph();
+  flushCodeBlock();
+
+  return sentences;
+}
+
+function formatOverlapText(sentences: string[]): string {
+  const lines: string[] = [];
+  let paragraph = '';
+
+  for (const sentence of sentences) {
+    const trimmed = sentence.trim();
+    if (!trimmed) continue;
+
+    if (isHeadingLine(trimmed) || isListLine(trimmed) || trimmed.includes('\n')) {
+      if (paragraph) {
+        lines.push(paragraph.trim());
+        paragraph = '';
+      }
+      lines.push(trimmed);
+      continue;
+    }
+
+    paragraph = paragraph ? `${paragraph} ${trimmed}` : trimmed;
+  }
+
+  if (paragraph) {
+    lines.push(paragraph.trim());
+  }
+
+  return lines.join('\n\n');
+}
+
+function extractOverlapText(text: string, overlapTokens: number): string {
+  if (overlapTokens <= 0) return '';
+  const trimmed = text.trim();
+  if (!trimmed) return '';
+  if (estimateTokens(trimmed) <= overlapTokens) return trimmed;
+
+  const sentences = splitIntoOverlapSentences(trimmed);
+  if (sentences.length === 0) return '';
+
+  const selected: string[] = [];
+  let tokens = 0;
+
+  for (let i = sentences.length - 1; i >= 0; i--) {
+    const sentence = sentences[i]!;
+    const sentenceTokens = estimateTokens(sentence);
+    if (sentenceTokens > overlapTokens) {
+      if (selected.length > 0) {
+        break;
+      }
+      continue;
+    }
+    if (tokens + sentenceTokens > overlapTokens && selected.length > 0) {
+      break;
+    }
+    selected.push(sentence);
+    tokens += sentenceTokens;
+    if (tokens >= overlapTokens) break;
+  }
+
+  selected.reverse();
+  return formatOverlapText(selected);
+}
+
+function applyOverlap(chunks: Chunk[], overlapTokens: number, maxTokens: number): Chunk[] {
+  if (overlapTokens <= 0 || chunks.length <= 1) {
+    return chunks;
+  }
+
+  return chunks.map((chunk, index) => {
+    if (index === 0) {
+      return chunk;
+    }
+
+    const previous = chunks[index - 1];
+    const trimmedChunk = chunk.text.trim();
+    const availableOverlapTokens = Math.max(0, maxTokens - estimateTokens(trimmedChunk));
+    const overlapText = previous
+      ? extractOverlapText(previous.text, Math.min(overlapTokens, availableOverlapTokens))
+      : '';
+    if (!overlapText) {
+      return chunk;
+    }
+
+    const trimmedOverlap = overlapText.trim();
+    const mergedText = trimmedChunk.startsWith(trimmedOverlap)
+      ? trimmedChunk
+      : `${trimmedOverlap}\n\n${trimmedChunk}`.trim();
+    const mergedTokens = estimateTokens(mergedText);
+    if (mergedTokens > maxTokens) {
+      return chunk;
+    }
+
+    return {
+      ...chunk,
+      text: mergedText,
+      est_tokens: mergedTokens,
+      char_len: mergedText.length,
+    };
+  });
 }
 
 /**

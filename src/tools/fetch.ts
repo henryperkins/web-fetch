@@ -1,18 +1,23 @@
 /**
  * Fetch Tool
  *
- * Main tool for fetching and extracting content from URLs.
+ * Main tool for fetching and extracting content from URLs or raw bytes.
  */
 
+import { randomUUID } from 'crypto';
 import type {
+  AiSearchOptions,
+  ExtractionOptions,
+  FetchMode,
   FetchOptions,
-  FetchResult,
+  FormatOptions,
   LLMPacket,
   NormalizedContent,
   RawFetchResult,
+  RenderOptions,
 } from '../types.js';
 import type { AiSearchIngestResult } from '../ai-search/index.js';
-import { httpFetchWithRetry } from '../fetcher/http-fetcher.js';
+import { httpFetchWithRetry, type HttpFetchError } from '../fetcher/http-fetcher.js';
 import { browserRender, isBrowserAvailable } from '../fetcher/browser-renderer.js';
 import { applyCrawlDelay, checkRobots } from '../fetcher/robots.js';
 import { normalizeContent, toNormalizedContent } from '../processing/normalizer.js';
@@ -24,12 +29,14 @@ import { ingestPacketToAiSearch } from '../ai-search/index.js';
 import { storePacketResource } from '../resources/store.js';
 
 export interface FetchToolInput {
-  url: string;
   options?: FetchOptions;
 }
 
 export interface FetchToolOutput {
   success: boolean;
+  request_id: string;
+  duration_ms: number;
+  retry_count: number;
   packet?: LLMPacket;
   normalized?: NormalizedContent;
   raw?: {
@@ -47,9 +54,34 @@ export interface FetchToolOutput {
 }
 
 type FetchToolError = NonNullable<FetchToolOutput['error']>;
+type FetchToolOutputBase = Omit<FetchToolOutput, 'request_id' | 'duration_ms' | 'retry_count'>;
+
+interface RuntimeFetchOptions {
+  url?: string;
+  raw_bytes?: Buffer;
+  content_type?: string;
+  canonical_url?: string;
+  mode: FetchMode;
+  headers?: Record<string, string>;
+  timeout_ms?: number;
+  max_bytes?: number;
+  max_redirects?: number;
+  user_agent?: string;
+  respect_robots?: boolean;
+  cache_ttl_s?: number;
+  render_requested: boolean;
+  render: RenderOptions;
+  extraction?: ExtractionOptions;
+  format?: FormatOptions;
+  ai_search?: AiSearchOptions;
+}
 
 function countWords(text: string): number {
   return text.trim().split(/\s+/).filter(word => word.length > 0).length;
+}
+
+function hasDefinedValue(record: Record<string, unknown>): boolean {
+  return Object.values(record).some(value => value !== undefined);
 }
 
 function shouldAttemptRenderFallback(
@@ -87,10 +119,119 @@ function shouldAttemptRenderFallback(
   return false;
 }
 
+function buildFetchErrorDetails(error: HttpFetchError): Record<string, unknown> | undefined {
+  const details: Record<string, unknown> = {};
+  if (error.url) {
+    details['url'] = error.url;
+  }
+  if (typeof error.statusCode === 'number') {
+    details['status_code'] = error.statusCode;
+  }
+  if (error.retryAfter !== undefined) {
+    details['retry_after'] = error.retryAfter;
+  }
+  return Object.keys(details).length > 0 ? details : undefined;
+}
+
+function resolveRenderOptions(options: FetchOptions): { requested: boolean; render?: RenderOptions } {
+  const nestedRender = typeof options.render === 'object' && options.render !== null
+    ? options.render
+    : undefined;
+  const requested = options.render === true || nestedRender !== undefined;
+  const renderOptions: RenderOptions = {
+    wait_until: options.render_wait_until ?? nestedRender?.wait_until,
+    wait_ms: options.render_wait_ms ?? nestedRender?.wait_ms,
+    block_third_party: options.render_block_third_party ?? nestedRender?.block_third_party,
+    screenshot: options.render_screenshot ?? nestedRender?.screenshot,
+    selector: options.render_selector ?? nestedRender?.selector,
+  };
+
+  return {
+    requested,
+    render: hasDefinedValue(renderOptions as Record<string, unknown>) ? renderOptions : undefined,
+  };
+}
+
+function resolveExtractionOptions(options: FetchOptions): ExtractionOptions | undefined {
+  const extraction: ExtractionOptions = {
+    prefer_readability: options.extraction?.prefer_readability ?? options.extract_readability,
+    keep_tables: options.extraction?.keep_tables ?? options.extract_tables,
+    keep_code_blocks: options.extraction?.keep_code_blocks ?? options.extract_code_blocks,
+    remove_selectors: options.extraction?.remove_selectors ?? options.extract_remove_selectors,
+  };
+
+  return hasDefinedValue(extraction as Record<string, unknown>) ? extraction : undefined;
+}
+
+function resolveFormatOptions(options: FetchOptions): FormatOptions | undefined {
+  const format: FormatOptions = {
+    output: options.format?.output,
+    include_raw_excerpt: options.format?.include_raw_excerpt ?? options.include_raw_excerpt,
+  };
+
+  return hasDefinedValue(format as Record<string, unknown>) ? format : undefined;
+}
+
+function resolveAiSearchOptions(options: FetchOptions): AiSearchOptions | undefined {
+  const aliasQuery = options.search_query
+    ? {
+        query: options.search_query,
+        mode: options.search_mode,
+        rewrite_query: options.search_rewrite_query,
+        max_num_results: options.search_max_results,
+      }
+    : undefined;
+
+  if (options.ai_search) {
+    return {
+      ...options.ai_search,
+      thread_key: options.ai_search.thread_key ?? options.search_thread_key,
+      query: options.ai_search.query ?? aliasQuery,
+    };
+  }
+
+  if (!aliasQuery && options.search_thread_key === undefined) {
+    return undefined;
+  }
+
+  return {
+    enabled: true,
+    thread_key: options.search_thread_key,
+    query: aliasQuery,
+  };
+}
+
+function normalizeFetchOptions(options: FetchOptions): RuntimeFetchOptions {
+  const render = resolveRenderOptions(options);
+  const extraction = resolveExtractionOptions(options);
+  const format = resolveFormatOptions(options);
+  const aiSearch = resolveAiSearchOptions(options);
+
+  return {
+    url: options.url,
+    raw_bytes: options.raw_bytes,
+    content_type: options.content_type,
+    canonical_url: options.canonical_url,
+    mode: options.mode ?? 'auto',
+    headers: options.headers,
+    timeout_ms: options.timeout_ms,
+    max_bytes: options.max_bytes,
+    max_redirects: options.max_redirects,
+    user_agent: options.user_agent,
+    respect_robots: options.respect_robots,
+    cache_ttl_s: options.cache_ttl_s,
+    render_requested: render.requested,
+    render: render.render ?? {},
+    extraction,
+    format,
+    ai_search: aiSearch,
+  };
+}
+
 async function fetchWithRender(
   url: string,
   config: ReturnType<typeof getConfig>,
-  options: FetchOptions
+  options: RuntimeFetchOptions
 ): Promise<{ success: true; result: RawFetchResult; screenshot?: Buffer } | { success: false; error: FetchToolError }> {
   const browserAvailable = await isBrowserAvailable();
   if (!browserAvailable) {
@@ -159,11 +300,11 @@ async function fetchWithRender(
   }
 
   const renderResult = await browserRender(url, {
-    wait_until: options.render?.wait_until,
-    wait_ms: options.render?.wait_ms,
-    block_third_party: options.render?.block_third_party,
-    screenshot: options.render?.screenshot,
-    selector: options.render?.selector,
+    wait_until: options.render.wait_until,
+    wait_ms: options.render.wait_ms,
+    block_third_party: options.render.block_third_party,
+    screenshot: options.render.screenshot,
+    selector: options.render.selector,
     timeout_ms: options.timeout_ms,
     max_bytes: options.max_bytes,
     user_agent: effectiveUserAgent,
@@ -206,14 +347,29 @@ async function fetchWithRender(
 }
 
 /**
- * Execute the fetch tool
+ * Execute the fetch tool.
  */
 export async function executeFetch(input: FetchToolInput): Promise<FetchToolOutput> {
-  const { url, options = {} } = input;
+  const rawOptions = input.options ?? {};
+  const options = normalizeFetchOptions(rawOptions);
   const config = getConfig();
+  const requestId = randomUUID();
+  const startTime = Date.now();
+  let retryCount = 0;
+
+  const withDiagnostics = (output: FetchToolOutputBase): FetchToolOutput => ({
+    ...output,
+    request_id: requestId,
+    duration_ms: Date.now() - startTime,
+    retry_count: retryCount,
+  });
 
   const {
-    mode = 'auto',
+    url,
+    raw_bytes,
+    content_type,
+    canonical_url,
+    mode,
     headers,
     timeout_ms,
     max_bytes,
@@ -221,228 +377,309 @@ export async function executeFetch(input: FetchToolInput): Promise<FetchToolOutp
     user_agent,
     respect_robots,
     cache_ttl_s,
+    render_requested,
     extraction,
     format,
+    ai_search,
   } = options;
-  const wantsScreenshot = options.render?.screenshot === true;
+  const wantsScreenshot = options.render.screenshot === true;
+
+  if ((url && raw_bytes) || (!url && !raw_bytes)) {
+    return withDiagnostics({
+      success: false,
+      error: {
+        code: 'INVALID_INPUT',
+        message: 'Provide exactly one of url or raw_bytes',
+      },
+    });
+  }
 
   try {
     let rawResult: RawFetchResult | null = null;
     let screenshot: Buffer | undefined;
     let usedRender = false;
     let lastRenderError: FetchToolError | undefined;
+    let sourceUrl = url ?? canonical_url ?? 'unknown://source';
 
-    // Determine fetch mode
-    let useRender = mode === 'render';
-
-    if (mode === 'auto') {
-      // Use render mode for certain domains/patterns that typically need JS
-      const jsHeavySites = [
-        'twitter.com',
-        'x.com',
-        'facebook.com',
-        'instagram.com',
-        'linkedin.com',
-        'reddit.com',
-        'medium.com',
-        'substack.com',
-      ];
-
-      const hostname = new URL(url).hostname.toLowerCase();
-      useRender = jsHeavySites.some(site =>
-        hostname === site || hostname.endsWith('.' + site)
-      );
-
-      // Only use render if available
-      if (useRender && !config.playwrightEnabled) {
-        useRender = false;
-      }
-    }
-
-    const tryRender = async (): Promise<{ success: true; result: RawFetchResult; screenshot?: Buffer } | { success: false }> => {
-      const renderResult = await fetchWithRender(url, config, options);
-      if (!renderResult.success) {
-        lastRenderError = renderResult.error;
-        return { success: false };
-      }
-
-      return {
-        success: true,
-        result: renderResult.result,
-        screenshot: renderResult.screenshot,
+    if (raw_bytes) {
+      const effectiveContentType = content_type || 'application/octet-stream';
+      rawResult = {
+        status: 200,
+        headers: {
+          'content-type': effectiveContentType,
+        },
+        body: raw_bytes,
+        finalUrl: sourceUrl,
+        contentType: effectiveContentType,
       };
-    };
+    } else {
+      sourceUrl = url!;
 
-    if (useRender) {
-      const renderAttempt = await tryRender();
-      if (!renderAttempt.success) {
-        if (mode !== 'auto') {
-          return {
-            success: false,
-            error: lastRenderError,
-          };
+      let useRender = mode === 'render' || render_requested;
+      if (mode === 'auto' && !useRender) {
+        const jsHeavySites = [
+          'twitter.com',
+          'x.com',
+          'facebook.com',
+          'instagram.com',
+          'linkedin.com',
+          'reddit.com',
+          'medium.com',
+          'substack.com',
+        ];
+
+        const hostname = new URL(sourceUrl).hostname.toLowerCase();
+        useRender = jsHeavySites.some(site =>
+          hostname === site || hostname.endsWith(`.${site}`)
+        );
+
+        if (useRender && !config.playwrightEnabled) {
+          useRender = false;
         }
-      } else {
-        rawResult = renderAttempt.result;
-        screenshot = renderAttempt.screenshot;
-        usedRender = true;
       }
-    }
 
-    if (!rawResult) {
-      const httpResult = await httpFetchWithRetry(url, {
-        headers,
-        timeout_ms,
-        max_bytes,
-        max_redirects,
-        user_agent,
-        respect_robots,
-        cache_ttl_s,
+      const tryRender = async (): Promise<{ success: true; result: RawFetchResult; screenshot?: Buffer } | { success: false }> => {
+        const renderResult = await fetchWithRender(sourceUrl, config, options);
+        if (!renderResult.success) {
+          lastRenderError = renderResult.error;
+          return { success: false };
+        }
+
+        return {
+          success: true,
+          result: renderResult.result,
+          screenshot: renderResult.screenshot,
+        };
+      };
+
+      if (useRender) {
+        const renderAttempt = await tryRender();
+        if (!renderAttempt.success) {
+          if (mode !== 'auto' || render_requested) {
+            return withDiagnostics({
+              success: false,
+              error: lastRenderError,
+            });
+          }
+        } else {
+          rawResult = renderAttempt.result;
+          screenshot = renderAttempt.screenshot;
+          usedRender = true;
+        }
+      }
+
+      if (!rawResult) {
+        const httpResult = await httpFetchWithRetry(sourceUrl, {
+          headers,
+          timeout_ms,
+          max_bytes,
+          max_redirects,
+          user_agent,
+          respect_robots,
+          cache_ttl_s,
+        });
+        retryCount = Math.max(0, httpResult.attempts - 1);
+
+        if (!httpResult.success) {
+          return withDiagnostics({
+            success: false,
+            error: {
+              code: httpResult.error.code,
+              message: httpResult.error.message,
+              details: buildFetchErrorDetails(httpResult.error),
+            },
+          });
+        }
+
+        rawResult = httpResult.result;
+      }
+
+      if (format?.output === 'raw') {
+        return withDiagnostics({
+          success: true,
+          raw: {
+            bytes_length: rawResult.body.length,
+            content_type: rawResult.contentType,
+            headers: rawResult.headers,
+          },
+        });
+      }
+
+      let normalizeResult = await normalizeContent(rawResult, sourceUrl, {
+        extraction,
+        format,
       });
 
-      if (!httpResult.success) {
-        return {
-          success: false,
-          error: {
-            code: httpResult.error.code,
-            message: httpResult.error.message,
-            details: httpResult.error.statusCode,
-          },
-        };
+      if (!normalizeResult.success || !normalizeResult.packet) {
+        if (mode === 'auto' && !usedRender && config.playwrightEnabled) {
+          const renderAttempt = await tryRender();
+          if (renderAttempt.success) {
+            const renderNormalize = await normalizeContent(renderAttempt.result, sourceUrl, {
+              extraction,
+              format,
+            });
+            if (renderNormalize.success && renderNormalize.packet) {
+              normalizeResult = renderNormalize;
+              rawResult = renderAttempt.result;
+              screenshot = renderAttempt.screenshot;
+              usedRender = true;
+            }
+          }
+        }
+
+        if (!normalizeResult.success || !normalizeResult.packet) {
+          return withDiagnostics({
+            success: false,
+            error: {
+              code: 'EXTRACTION_FAILED',
+              message: normalizeResult.error || 'Failed to extract content',
+            },
+          });
+        }
       }
 
-      rawResult = httpResult.result;
+      if (mode === 'auto' && !usedRender && config.playwrightEnabled) {
+        if (shouldAttemptRenderFallback(rawResult, normalizeResult.packet)) {
+          const renderAttempt = await tryRender();
+          if (renderAttempt.success) {
+            const renderNormalize = await normalizeContent(renderAttempt.result, sourceUrl, {
+              extraction,
+              format,
+            });
+            if (renderNormalize.success && renderNormalize.packet) {
+              normalizeResult = renderNormalize;
+              rawResult = renderAttempt.result;
+              screenshot = renderAttempt.screenshot;
+              usedRender = true;
+            }
+          }
+        }
+      }
+
+      if (wantsScreenshot && !screenshot && config.playwrightEnabled) {
+        const renderAttempt = await tryRender();
+        if (renderAttempt.success) {
+          screenshot = renderAttempt.screenshot;
+        }
+      }
+
+      const packet = normalizeResult.packet!;
+
+      if (screenshot) {
+        packet.screenshot_base64 = screenshot.toString('base64');
+      }
+
+      let aiSearchResult: AiSearchIngestResult | undefined;
+      const aiSearchEnabled = ai_search?.enabled ?? config.aiSearchEnabled;
+      if (aiSearchEnabled) {
+        aiSearchResult = await ingestPacketToAiSearch(
+          packet,
+          ai_search ?? {},
+          config
+        );
+
+        const aiSearchError = aiSearchResult.error ?? aiSearchResult.query?.error;
+        if (aiSearchError && ai_search?.require_success) {
+          return withDiagnostics({
+            success: false,
+            error: {
+              code: aiSearchError.code,
+              message: aiSearchError.message,
+              details: aiSearchError.details,
+            },
+          });
+        }
+      }
+
+      const normalizedOutput = format?.output === 'normalized'
+        ? toNormalizedContent(packet)
+        : undefined;
+
+      storePacketResource(packet);
+
+      return withDiagnostics({
+        success: true,
+        packet: format?.output === 'normalized' ? undefined : packet,
+        normalized: normalizedOutput,
+        screenshot_base64: screenshot ? screenshot.toString('base64') : packet.screenshot_base64,
+        ai_search: aiSearchResult,
+      });
     }
 
-    // Check output format
     if (format?.output === 'raw') {
-      return {
+      return withDiagnostics({
         success: true,
         raw: {
           bytes_length: rawResult.body.length,
           content_type: rawResult.contentType,
           headers: rawResult.headers,
         },
-      };
+      });
     }
 
-    let normalizedOutput: NormalizedContent | undefined;
-
-    // Normalize content into LLMPacket
-    let normalizeResult = await normalizeContent(rawResult, url, {
+    const normalizeResult = await normalizeContent(rawResult, sourceUrl, {
       extraction,
       format,
     });
 
     if (!normalizeResult.success || !normalizeResult.packet) {
-      if (mode === 'auto' && !usedRender && config.playwrightEnabled) {
-        const renderAttempt = await tryRender();
-        if (renderAttempt.success) {
-          const renderNormalize = await normalizeContent(renderAttempt.result, url, {
-            extraction,
-            format,
-          });
-          if (renderNormalize.success && renderNormalize.packet) {
-            normalizeResult = renderNormalize;
-            rawResult = renderAttempt.result;
-            screenshot = renderAttempt.screenshot;
-            usedRender = true;
-          }
-        }
-      }
-
-      if (!normalizeResult.success || !normalizeResult.packet) {
-        return {
-          success: false,
-          error: {
-            code: 'EXTRACTION_FAILED',
-            message: normalizeResult.error || 'Failed to extract content',
-          },
-        };
-      }
+      return withDiagnostics({
+        success: false,
+        error: {
+          code: 'EXTRACTION_FAILED',
+          message: normalizeResult.error || 'Failed to extract content',
+        },
+      });
     }
 
-    if (mode === 'auto' && !usedRender && config.playwrightEnabled) {
-      if (shouldAttemptRenderFallback(rawResult, normalizeResult.packet)) {
-        const renderAttempt = await tryRender();
-        if (renderAttempt.success) {
-          const renderNormalize = await normalizeContent(renderAttempt.result, url, {
-            extraction,
-            format,
-          });
-          if (renderNormalize.success && renderNormalize.packet) {
-            normalizeResult = renderNormalize;
-            rawResult = renderAttempt.result;
-            screenshot = renderAttempt.screenshot;
-            usedRender = true;
-          }
-        }
-      }
-    }
-
-    if (wantsScreenshot && !screenshot && config.playwrightEnabled) {
-      const renderAttempt = await tryRender();
-      if (renderAttempt.success) {
-        screenshot = renderAttempt.screenshot;
-      }
-    }
-
-    // Add screenshot if taken
-    if (screenshot && normalizeResult.packet) {
-      normalizeResult.packet.screenshot_base64 = screenshot.toString('base64');
-    }
-
+    const packet = normalizeResult.packet!;
     let aiSearchResult: AiSearchIngestResult | undefined;
-    const aiSearchEnabled = options.ai_search?.enabled ?? config.aiSearchEnabled;
-    if (aiSearchEnabled && normalizeResult.packet) {
+    const aiSearchEnabled = ai_search?.enabled ?? config.aiSearchEnabled;
+    if (aiSearchEnabled) {
       aiSearchResult = await ingestPacketToAiSearch(
-        normalizeResult.packet,
-        options.ai_search ?? {},
+        packet,
+        ai_search ?? {},
         config
       );
 
       const aiSearchError = aiSearchResult.error ?? aiSearchResult.query?.error;
-      if (aiSearchError && options.ai_search?.require_success) {
-        return {
+      if (aiSearchError && ai_search?.require_success) {
+        return withDiagnostics({
           success: false,
           error: {
             code: aiSearchError.code,
             message: aiSearchError.message,
             details: aiSearchError.details,
           },
-        };
+        });
       }
     }
 
-    if (format?.output === 'normalized' && normalizeResult.packet) {
-      normalizedOutput = toNormalizedContent(normalizeResult.packet);
-    }
+    const normalizedOutput = format?.output === 'normalized'
+      ? toNormalizedContent(packet)
+      : undefined;
 
-    if (normalizeResult.packet) {
-      storePacketResource(normalizeResult.packet);
-    }
+    storePacketResource(packet);
 
-    return {
+    return withDiagnostics({
       success: true,
-      packet: format?.output === 'normalized' ? undefined : normalizeResult.packet,
+      packet: format?.output === 'normalized' ? undefined : packet,
       normalized: normalizedOutput,
-      screenshot_base64: screenshot ? screenshot.toString('base64') : normalizeResult.packet?.screenshot_base64,
       ai_search: aiSearchResult,
-    };
-
+    });
   } catch (err) {
-    return {
+    return withDiagnostics({
       success: false,
       error: {
         code: 'UNEXPECTED_ERROR',
         message: err instanceof Error ? err.message : 'Unknown error occurred',
       },
-    };
+    });
   }
 }
 
 /**
- * Get JSON schema for fetch tool input
+ * Get JSON schema for fetch tool input.
  */
 export function getFetchInputSchema(): object {
   return {
@@ -450,7 +687,19 @@ export function getFetchInputSchema(): object {
     properties: {
       url: {
         type: 'string',
-        description: 'The URL to fetch',
+        description: 'The URL to fetch. Required unless raw_bytes is provided instead.',
+      },
+      raw_bytes: {
+        type: 'string',
+        description: 'Base64-encoded raw bytes to extract from (alternative to url). If provided, url is not required.',
+      },
+      content_type: {
+        type: 'string',
+        description: 'Content type of raw_bytes (for example text/html)',
+      },
+      canonical_url: {
+        type: 'string',
+        description: 'Canonical URL for raw_bytes input',
       },
       options: {
         type: 'object',
@@ -557,7 +806,7 @@ export function getFetchInputSchema(): object {
               },
               thread_key: {
                 type: 'string',
-                description: 'Stable conversation/thread identifier used to scope the knowledge base (overrides WEB_FETCH_THREAD_KEY)',
+                description: 'Stable conversation/thread identifier used to scope the knowledge base',
               },
               prefix: {
                 type: 'string',
@@ -565,7 +814,7 @@ export function getFetchInputSchema(): object {
               },
               max_file_bytes: {
                 type: 'number',
-                description: 'Maximum bytes per uploaded file (default: 4MB)',
+                description: 'Maximum bytes per uploaded file',
               },
               wait_ms: {
                 type: 'number',
@@ -607,6 +856,22 @@ export function getFetchInputSchema(): object {
                 required: ['query'],
               },
             },
+          },
+          url: {
+            type: 'string',
+            description: 'Deprecated: use the top-level url field instead',
+          },
+          raw_bytes: {
+            type: 'string',
+            description: 'Deprecated: use the top-level raw_bytes field instead',
+          },
+          content_type: {
+            type: 'string',
+            description: 'Deprecated: use the top-level content_type field instead',
+          },
+          canonical_url: {
+            type: 'string',
+            description: 'Deprecated: use the top-level canonical_url field instead',
           },
         },
       },

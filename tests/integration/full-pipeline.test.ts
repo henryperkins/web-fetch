@@ -18,8 +18,8 @@ describe('Full Pipeline Integration', () => {
   it('should complete full pipeline: fetch -> chunk -> compact', async () => {
     // Step 1: Fetch
     const fetchResult = await executeFetch({
-      url: 'https://httpbin.org/html',
       options: {
+        url: 'https://httpbin.org/html',
         mode: 'http',
         timeout_ms: 30000,
       },
@@ -49,7 +49,7 @@ describe('Full Pipeline Integration', () => {
     }
 
     // Step 3: Compact
-    const compactResult = executeCompact({
+    const compactResult = await executeCompact({
       input: fetchResult.packet!,
       options: {
         max_tokens: 200,
@@ -65,19 +65,14 @@ describe('Full Pipeline Integration', () => {
 
   it('should handle fetch with extraction options', async () => {
     const result = await executeFetch({
-      url: 'https://httpbin.org/html',
       options: {
+        url: 'https://httpbin.org/html',
         mode: 'http',
         timeout_ms: 30000,
-        extraction: {
-          prefer_readability: true,
-          keep_tables: true,
-          keep_code_blocks: true,
-        },
-        format: {
-          output: 'llm_packet',
-          include_raw_excerpt: true,
-        },
+        extract_readability: true,
+        extract_tables: true,
+        extract_code_blocks: true,
+        include_raw_excerpt: true,
       },
     });
 
@@ -88,8 +83,8 @@ describe('Full Pipeline Integration', () => {
 
   it('should support question-focused compaction', async () => {
     const fetchResult = await executeFetch({
-      url: 'https://httpbin.org/html',
       options: {
+        url: 'https://httpbin.org/html',
         mode: 'http',
         timeout_ms: 30000,
       },
@@ -97,7 +92,7 @@ describe('Full Pipeline Integration', () => {
 
     expect(fetchResult.success).toBe(true);
 
-    const compactResult = executeCompact({
+    const compactResult = await executeCompact({
       input: fetchResult.packet!,
       options: {
         max_tokens: 200,
@@ -114,8 +109,8 @@ describe('Full Pipeline Integration', () => {
   it('should chunk and compact from ChunkSet', async () => {
     // Fetch content
     const fetchResult = await executeFetch({
-      url: 'https://httpbin.org/html',
       options: {
+        url: 'https://httpbin.org/html',
         mode: 'http',
         timeout_ms: 30000,
       },
@@ -132,7 +127,7 @@ describe('Full Pipeline Integration', () => {
     expect(chunkResult.success).toBe(true);
 
     // Compact from chunks
-    const compactResult = executeCompact({
+    const compactResult = await executeCompact({
       input: chunkResult.chunks!,
       options: {
         max_tokens: 150,
@@ -147,8 +142,8 @@ describe('Full Pipeline Integration', () => {
   it('should detect prompt injection in fetched content', async () => {
     // Create a simple test - injection detection happens during extraction
     const fetchResult = await executeFetch({
-      url: 'https://httpbin.org/html',
       options: {
+        url: 'https://httpbin.org/html',
         mode: 'http',
         timeout_ms: 30000,
       },
@@ -162,8 +157,8 @@ describe('Full Pipeline Integration', () => {
 
   it('should generate valid source_id across pipeline', async () => {
     const fetchResult = await executeFetch({
-      url: 'https://httpbin.org/html',
       options: {
+        url: 'https://httpbin.org/html',
         mode: 'http',
         timeout_ms: 30000,
       },
@@ -183,7 +178,7 @@ describe('Full Pipeline Integration', () => {
     expect(chunkResult.chunks?.source_id).toBe(sourceId);
 
     // Compact should include source_id
-    const compactResult = executeCompact({
+    const compactResult = await executeCompact({
       input: fetchResult.packet!,
       options: { max_tokens: 200 },
     });

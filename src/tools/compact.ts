@@ -5,7 +5,7 @@
  */
 
 import type { LLMPacket, ChunkSet, CompactedPacket, CompactOptions } from '../types.js';
-import { compactContent } from '../processing/compactor.js';
+import { compactContent, compactContentAsync } from '../processing/compactor.js';
 import { getConfig } from '../config.js';
 
 export interface CompactToolInput {
@@ -23,9 +23,9 @@ export interface CompactToolOutput {
 }
 
 /**
- * Execute the compact tool
+ * Execute the compact tool (async — uses LLM when AI Gateway is configured)
  */
-export function executeCompact(input: CompactToolInput): CompactToolOutput {
+export async function executeCompact(input: CompactToolInput): Promise<CompactToolOutput> {
   const { input: contentInput, options = {} } = input;
   const config = getConfig();
 
@@ -37,7 +37,7 @@ export function executeCompact(input: CompactToolInput): CompactToolOutput {
       preserve: options.preserve ?? ['numbers', 'dates', 'names'],
     };
 
-    const compacted = compactContent(contentInput, compactOptions);
+    const compacted = await compactContentAsync(contentInput, compactOptions);
 
     return {
       success: true,

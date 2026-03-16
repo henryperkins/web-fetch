@@ -81,33 +81,40 @@ function detectCode(text: string): boolean {
  * Truncate text to approximately max tokens
  */
 export function truncateToTokens(text: string, maxTokens: number): { text: string; truncated: boolean } {
-  const currentTokens = estimateTokens(text);
+  let current = text;
+  let wasTruncated = false;
 
-  if (currentTokens <= maxTokens) {
-    return { text, truncated: false };
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const currentTokens = estimateTokens(current);
+    if (currentTokens <= maxTokens) {
+      return { text: current.trim(), truncated: wasTruncated };
+    }
+
+    wasTruncated = true;
+    const ratio = maxTokens / currentTokens;
+    const targetChars = Math.floor(current.length * ratio * 0.9);
+    if (targetChars <= 0) {
+      return { text: '', truncated: true };
+    }
+
+    let candidate = current.substring(0, targetChars);
+
+    const lastParagraph = candidate.lastIndexOf('\n\n');
+    const lastSentence = candidate.search(/[.!?]\s+[A-Z][^.!?]*$/);
+    const lastNewline = candidate.lastIndexOf('\n');
+
+    if (lastParagraph > targetChars * 0.8) {
+      candidate = candidate.substring(0, lastParagraph);
+    } else if (lastSentence > targetChars * 0.8) {
+      candidate = candidate.substring(0, lastSentence + 1);
+    } else if (lastNewline > targetChars * 0.9) {
+      candidate = candidate.substring(0, lastNewline);
+    }
+
+    current = candidate.trim();
   }
 
-  // Estimate how many characters we need
-  const ratio = maxTokens / currentTokens;
-  const targetChars = Math.floor(text.length * ratio * 0.95); // 5% safety margin
-
-  // Try to cut at a sentence or paragraph boundary
-  let truncated = text.substring(0, targetChars);
-
-  // Try to find a good break point
-  const lastParagraph = truncated.lastIndexOf('\n\n');
-  const lastSentence = truncated.search(/[.!?]\s+[A-Z][^.!?]*$/);
-  const lastNewline = truncated.lastIndexOf('\n');
-
-  if (lastParagraph > targetChars * 0.8) {
-    truncated = truncated.substring(0, lastParagraph);
-  } else if (lastSentence > targetChars * 0.8) {
-    truncated = truncated.substring(0, lastSentence + 1);
-  } else if (lastNewline > targetChars * 0.9) {
-    truncated = truncated.substring(0, lastNewline);
-  }
-
-  return { text: truncated.trim(), truncated: true };
+  return { text: current.trim(), truncated: true };
 }
 
 /**

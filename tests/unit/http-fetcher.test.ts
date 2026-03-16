@@ -117,4 +117,41 @@ describe('httpFetch', () => {
     expect(result.success).toBe(true);
     expect(mockApplyCrawlDelay).toHaveBeenCalledWith('https://example.com', 2, 'test-agent');
   });
+
+  it('captures retry-after and url context on 429 responses', async () => {
+    const rateLimiter = {
+      recordRequest: vi.fn(),
+      recordError: vi.fn(),
+    };
+    mockGetRateLimiter.mockReturnValue(rateLimiter);
+
+    requestMock.mockResolvedValue({
+      statusCode: 429,
+      headers: { 'retry-after': '120' },
+      body: {
+        async dump() { /* noop */ },
+        async *[Symbol.asyncIterator]() { /* not consumed */ },
+      },
+    });
+
+    const result = await httpFetch('https://example.com/rate-limit');
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('HTTP_429');
+    expect(result.error?.retryAfter).toBe(120);
+    expect(result.error?.url).toBe('https://example.com/rate-limit');
+    expect(rateLimiter.recordError).toHaveBeenCalledWith('example.com', 120);
+  });
+
+  it('includes url context for fetch errors', async () => {
+    requestMock.mockImplementation(() => {
+      throw new Error('socket hang up');
+    });
+
+    const result = await httpFetch('https://example.com/failure');
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('FETCH_ERROR');
+    expect(result.error?.url).toBe('https://example.com/failure');
+  });
 });

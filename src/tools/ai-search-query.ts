@@ -5,10 +5,10 @@
  * requiring a new fetch.
  */
 
-import type { AiSearchQueryResult } from '../ai-search/index.js';
+import type { AiSearchQueryResult, AiSearchQueryOptions } from '../ai-search/index.js';
 import { queryAiSearchScoped } from '../ai-search/index.js';
 import { getConfig } from '../config.js';
-import type { AiSearchQueryOptions, Config } from '../types.js';
+import type { Config } from '../types.js';
 
 export interface AiSearchQueryToolInput {
   /**

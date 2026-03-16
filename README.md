@@ -99,9 +99,15 @@ AI_SEARCH_MAX_QUERY_WAIT_MS=15000
 
 ## MCP Tools
 
-### 1. `fetch(url, options)`
+### 1. `fetch(url|raw_bytes, options)`
 
-Fetch and extract content from a URL.
+Fetch and extract content from a URL or raw bytes.
+
+**Top-level input:**
+- `url`: URL to fetch
+- `raw_bytes`: Base64-encoded raw content to normalize instead of fetching
+- `content_type`: MIME type for `raw_bytes`
+- `canonical_url`: Canonical URL for `raw_bytes`
 
 **Options:**
 - `mode`: `"auto" | "http" | "render"` - Fetch mode (render uses Playwright)
@@ -136,6 +142,13 @@ Fetch and extract content from a URL.
     - `rewrite_query`, `max_num_results`, `ranking_options`, `reranking`, `filters`, `model`, `system_prompt`
   - Note: `ai_search` is skipped when `format.output` is `raw`
 
+Fetch responses include diagnostics fields:
+- `request_id`: Unique ID for the fetch request
+- `duration_ms`: End-to-end request duration in milliseconds
+- `retry_count`: Number of HTTP retries performed
+
+When `success` is false, `error.details` may include `url`, `status_code`, and `retry_after` (from 429 responses).
+
 ### 2. `extract(input, options)`
 
 Extract content from raw bytes or URL.
@@ -153,6 +166,7 @@ Split content into semantic chunks.
 **Options:**
 - `max_tokens`: Maximum tokens per chunk
 - `margin_ratio`: Safety margin (0-0.5)
+- `overlap_tokens`: Approximate token overlap between adjacent chunks
 - `strategy`: `"headings_first" | "balanced"`
 
 ### 4. `compact(input, options)`

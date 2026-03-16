@@ -30,6 +30,8 @@ export interface HttpFetchError {
   message: string;
   statusCode?: number;
   retryable: boolean;
+  url?: string;
+  retryAfter?: number | string;
 }
 
 export type HttpFetchResultSuccess = {
@@ -44,12 +46,40 @@ export type HttpFetchResultError = {
 
 export type HttpFetchResult = HttpFetchResultSuccess | HttpFetchResultError;
 
+export type HttpFetchResultWithRetries = (HttpFetchResultSuccess | HttpFetchResultError) & {
+  attempts: number;
+};
+
 // Keep-alive agent for connection pooling
 const agent = new Agent({
   keepAliveTimeout: 30000,
   keepAliveMaxTimeout: 60000,
   connections: 50,
 });
+
+function parseRetryAfterHeader(
+  header: string | string[] | undefined
+): { retryAfter?: number | string; retryAfterSeconds?: number } {
+  if (!header) return {};
+  const raw = Array.isArray(header) ? header[0] : header;
+  if (!raw) return {};
+  const trimmed = raw.trim();
+  if (!trimmed) return {};
+
+  const numeric = Number(trimmed);
+  if (Number.isFinite(numeric)) {
+    const seconds = Math.max(0, numeric);
+    return { retryAfter: seconds, retryAfterSeconds: seconds };
+  }
+
+  const dateMs = Date.parse(trimmed);
+  if (!Number.isNaN(dateMs)) {
+    const seconds = Math.max(0, Math.ceil((dateMs - Date.now()) / 1000));
+    return { retryAfter: seconds, retryAfterSeconds: seconds };
+  }
+
+  return { retryAfter: trimmed };
+}
 
 /**
  * Fetch a URL with all security checks and rate limiting
@@ -83,6 +113,7 @@ export async function httpFetch(
         code: 'INVALID_PROTOCOL',
         message: 'Only http:// and https:// protocols are allowed',
         retryable: false,
+        url,
       },
     };
   }
@@ -100,6 +131,7 @@ export async function httpFetch(
         code: 'SSRF_BLOCKED',
         message: ssrfCheck.error || 'Request blocked by SSRF protection',
         retryable: false,
+        url,
       },
     };
   }
@@ -120,6 +152,7 @@ export async function httpFetch(
           code: 'ROBOTS_BLOCKED',
           message: 'URL is blocked by robots.txt',
           retryable: false,
+          url,
         },
       };
     }
@@ -153,6 +186,7 @@ export async function httpFetch(
           code: 'RATE_LIMITED',
           message: 'Rate limit exceeded for this host',
           retryable: true,
+          url,
         },
       };
     }
@@ -174,6 +208,7 @@ export async function httpFetch(
           code: 'REDIRECT_LOOP',
           message: 'Redirect loop detected',
           retryable: false,
+          url: currentUrl,
         },
       };
     }
@@ -210,6 +245,7 @@ export async function httpFetch(
               message: 'Redirect without location header',
               statusCode,
               retryable: false,
+              url: currentUrl,
             },
           };
         }
@@ -230,6 +266,7 @@ export async function httpFetch(
               code: 'SSRF_BLOCKED',
               message: `Redirect to ${redirectUrl} blocked by SSRF protection`,
               retryable: false,
+              url: redirectUrl,
             },
           };
         }
@@ -248,6 +285,7 @@ export async function httpFetch(
                 code: 'ROBOTS_BLOCKED',
                 message: 'URL is blocked by robots.txt',
                 retryable: false,
+                url: redirectUrl,
               },
             };
           }
@@ -269,12 +307,13 @@ export async function httpFetch(
         await response.body.dump();
 
         const retryable = statusCode === 429 || statusCode >= 500;
+        const { retryAfter, retryAfterSeconds } = statusCode === 429
+          ? parseRetryAfterHeader(response.headers['retry-after'])
+          : {};
 
         // Handle rate limit response
         if (statusCode === 429 && hostname) {
-          const retryAfter = response.headers['retry-after'];
-          const retrySeconds = retryAfter ? parseInt(String(retryAfter), 10) : undefined;
-          getRateLimiter(config.rateLimitPerHost).recordError(hostname, retrySeconds);
+          getRateLimiter(config.rateLimitPerHost).recordError(hostname, retryAfterSeconds);
         }
 
         return {
@@ -284,8 +323,30 @@ export async function httpFetch(
             message: `HTTP ${statusCode} error`,
             statusCode,
             retryable,
+            url: currentUrl,
+            retryAfter,
           },
         };
+      }
+
+      const contentLengthHeader = response.headers['content-length'];
+      const contentLengthValue = Array.isArray(contentLengthHeader)
+        ? contentLengthHeader[0]
+        : contentLengthHeader;
+      if (contentLengthValue) {
+        const contentLength = Number(contentLengthValue);
+        if (Number.isFinite(contentLength) && contentLength > max_bytes) {
+          response.body.destroy();
+          return {
+            success: false,
+            error: {
+              code: 'CONTENT_TOO_LARGE',
+              message: `Response exceeds ${max_bytes} bytes`,
+              retryable: false,
+              url: currentUrl,
+            },
+          };
+        }
       }
 
       // Read body with size limit
@@ -329,6 +390,7 @@ export async function httpFetch(
             code: 'CONTENT_TOO_LARGE',
             message: `Response exceeds ${max_bytes} bytes`,
             retryable: false,
+            url: currentUrl,
           },
         };
       }
@@ -357,6 +419,7 @@ export async function httpFetch(
                     code: 'UNSUPPORTED_ENCODING',
                     message: `Unsupported content-encoding: ${encoding}`,
                     retryable: false,
+                    url: currentUrl,
                   },
                 };
             }
@@ -368,6 +431,7 @@ export async function httpFetch(
               code: 'DECOMPRESSION_FAILED',
               message: err instanceof Error ? err.message : 'Failed to decompress response',
               retryable: false,
+              url: currentUrl,
             },
           };
         }
@@ -380,6 +444,7 @@ export async function httpFetch(
             code: 'CONTENT_TOO_LARGE',
             message: `Response exceeds ${max_bytes} bytes`,
             retryable: false,
+            url: currentUrl,
           },
         };
       }
@@ -424,6 +489,11 @@ export async function httpFetch(
 
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';
+      const statusCode = typeof (err as { statusCode?: number }).statusCode === 'number'
+        ? (err as { statusCode?: number }).statusCode
+        : typeof (err as { response?: { statusCode?: number } }).response?.statusCode === 'number'
+          ? (err as { response?: { statusCode?: number } }).response?.statusCode
+          : undefined;
 
       // Check if retryable
       const retryable = message.includes('ECONNREFUSED') ||
@@ -441,6 +511,8 @@ export async function httpFetch(
           code: 'FETCH_ERROR',
           message,
           retryable,
+          statusCode,
+          url: currentUrl,
         },
       };
     }
@@ -452,6 +524,7 @@ export async function httpFetch(
       code: 'TOO_MANY_REDIRECTS',
       message: `Exceeded maximum redirects (${max_redirects})`,
       retryable: false,
+      url: currentUrl,
     },
   };
 }
@@ -462,7 +535,7 @@ export async function httpFetch(
 export async function httpFetchWithRetry(
   url: string,
   options: HttpFetchOptions & { maxRetries?: number } = {}
-): Promise<HttpFetchResult> {
+): Promise<HttpFetchResultWithRetries> {
   const { maxRetries = 3, ...fetchOptions } = options;
 
   let lastError: HttpFetchError | null = null;
@@ -471,13 +544,13 @@ export async function httpFetchWithRetry(
     const result = await httpFetch(url, fetchOptions);
 
     if (result.success) {
-      return result;
+      return { ...result, attempts: attempt + 1 };
     }
 
     lastError = result.error;
 
     if (!result.error.retryable) {
-      return result;
+      return { ...result, attempts: attempt + 1 };
     }
 
     // Exponential backoff
@@ -494,6 +567,7 @@ export async function httpFetchWithRetry(
       message: 'Unknown error after retries',
       retryable: false,
     },
+    attempts: maxRetries,
   };
 }
 

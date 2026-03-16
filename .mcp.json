@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "web-fetch-mcp": {
+      "command": "node",
+      "args": ["dist/index.js"],
+      "cwd": "/home/azureuser/web-fetch-mcp"
+    }
+  }
+}

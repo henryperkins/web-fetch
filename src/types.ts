@@ -33,21 +33,6 @@ export interface FormatOptions {
   include_raw_excerpt?: boolean;
 }
 
-export interface FetchOptions {
-  mode?: FetchMode;
-  headers?: Record<string, string>;
-  timeout_ms?: number;
-  max_bytes?: number;
-  max_redirects?: number;
-  user_agent?: string;
-  respect_robots?: boolean;
-  cache_ttl_s?: number;
-  render?: RenderOptions;
-  extraction?: ExtractionOptions;
-  format?: FormatOptions;
-  ai_search?: AiSearchOptions;
-}
-
 export type AiSearchQueryMode = 'search' | 'ai_search';
 
 export interface AiSearchQueryOptions {
@@ -68,7 +53,6 @@ export interface AiSearchQueryOptions {
 }
 
 export interface AiSearchOptions {
-  /** Optional per-request thread key to scope uploads/queries to a conversation. */
   thread_key?: string;
   enabled?: boolean;
   prefix?: string;
@@ -79,20 +63,47 @@ export interface AiSearchOptions {
   query?: AiSearchQueryOptions;
 }
 
-// ============================================
-// EXTRACT OPTIONS
-// ============================================
-
-export interface ExtractInput {
+export interface FetchOptions {
+  // Source input (either url OR raw_bytes)
   url?: string;
   raw_bytes?: Buffer;
   content_type?: string;
   canonical_url?: string;
-}
 
-export interface ExtractOptions {
+  mode?: FetchMode;
+  headers?: Record<string, string>;
+  timeout_ms?: number;
+  max_bytes?: number;
+  max_redirects?: number;
+  user_agent?: string;
+  respect_robots?: boolean;
+  cache_ttl_s?: number;
+
+  // Canonical nested options
+  render?: boolean | RenderOptions;
   extraction?: ExtractionOptions;
   format?: FormatOptions;
+  ai_search?: AiSearchOptions;
+
+  // Flattened aliases retained for direct-call compatibility
+  render_wait_until?: WaitUntil;
+  render_wait_ms?: number;
+  render_block_third_party?: boolean;
+  render_screenshot?: boolean;
+  render_selector?: string;
+
+  extract_readability?: boolean;
+  extract_tables?: boolean;
+  extract_code_blocks?: boolean;
+  extract_remove_selectors?: string[];
+
+  include_raw_excerpt?: boolean;
+
+  search_query?: string;
+  search_mode?: AiSearchQueryMode;
+  search_rewrite_query?: boolean;
+  search_max_results?: number;
+  search_thread_key?: string;
 }
 
 // ============================================
@@ -103,6 +114,7 @@ export interface ChunkOptions {
   max_tokens: number;
   margin_ratio?: number;
   strategy?: ChunkStrategy;
+  overlap_tokens?: number;
 }
 
 // ============================================
@@ -261,13 +273,17 @@ export interface CompactedPacket {
 
 export interface FetchResult {
   success: boolean;
+  request_id: string;
+  duration_ms: number;
+  retry_count: number;
   packet?: LLMPacket;
   normalized?: NormalizedContent;
   raw?: {
-    bytes: Buffer;
+    bytes_length: number;
     content_type: string;
     headers: Record<string, string>;
   };
+  screenshot_base64?: string;
   error?: {
     code: string;
     message: string;
@@ -330,6 +346,12 @@ export interface Config {
   renderTimeoutMs: number;
   userAgent: string;
 
+  // AI Gateway (LLM-powered compaction)
+  aiGatewayEndpoint?: string;
+  aiGatewayToken?: string;
+  aiGatewayModel?: string;
+  aiGatewayTimeoutMs: number;
+
   // AI Search / KB
   aiSearchEnabled: boolean;
   aiSearchScope: AiSearchScope;
@@ -349,4 +371,20 @@ export interface Config {
   aiSearchQueryTimeoutMs: number;
   aiSearchQueryWaitMs: number;
   aiSearchMaxQueryWaitMs: number;
+}
+
+// ============================================
+// LEGACY TYPE ALIASES (for backward compatibility)
+// ============================================
+
+export interface ExtractInput {
+  url?: string;
+  raw_bytes?: Buffer;
+  content_type?: string;
+  canonical_url?: string;
+}
+
+export interface ExtractOptions {
+  extraction?: ExtractionOptions;
+  format?: FormatOptions;
 }

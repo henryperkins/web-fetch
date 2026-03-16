@@ -6,12 +6,40 @@
 
 import { S3Client, PutObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import type {
-  AiSearchOptions,
-  AiSearchQueryOptions,
-  AiSearchQueryMode,
   Config,
   LLMPacket,
 } from '../types.js';
+
+// AI Search types (simplified from types.ts)
+export type AiSearchQueryMode = 'search' | 'ai_search';
+
+export interface AiSearchQueryOptions {
+  query: string;
+  mode?: AiSearchQueryMode;
+  rewrite_query?: boolean;
+  max_num_results?: number;
+  ranking_options?: {
+    score_threshold?: number;
+  };
+  reranking?: {
+    enabled?: boolean;
+    model?: string;
+  };
+  filters?: Record<string, unknown>;
+  model?: string;
+  system_prompt?: string;
+}
+
+export interface AiSearchOptions {
+  thread_key?: string;
+  enabled?: boolean;
+  prefix?: string;
+  max_file_bytes?: number;
+  wait_ms?: number;
+  skip_if_exists?: boolean;
+  require_success?: boolean;
+  query?: AiSearchQueryOptions;
+}
 import { getConfig } from '../config.js';
 import { AiSearchScopeError, resolveAiSearchScope } from './state.js';
 import type { ScopeResolution } from './state.js';
@@ -40,6 +68,8 @@ export interface AiSearchIngestResult {
   bytes?: number;
   parts?: number;
   skipped_existing?: boolean;
+  skipped_quality?: boolean;
+  warning?: string;
   query?: AiSearchQueryResult;
   error?: {
     code: string;
@@ -166,6 +196,29 @@ function buildFrontmatter(packet: LLMPacket, part: number, parts: number): strin
   lines.push(`parts: ${parts}`);
   lines.push('---');
   return lines.join('\n');
+}
+
+/**
+ * Check if extracted markdown content is clean enough to be useful in a search index.
+ * Rejects content with excessive raw JSON/HTML or low letter-to-symbol ratio.
+ */
+function isCleanContent(markdown: string): boolean {
+  if (!markdown || markdown.trim().length === 0) return false;
+
+  // Reject if content has too many serialized JSON patterns (raw page data leak)
+  const jsonPatterns = (markdown.match(/"__typename"|"edges"|"node"|"pageInfo"/g) || []).length;
+  if (jsonPatterns > 5) return false;
+
+  // Reject if content has too many unprocessed HTML tags
+  const htmlTags = (markdown.match(/<[a-z]+[^>]*>/gi) || []).length;
+  if (htmlTags > 10) return false;
+
+  // Reject if letter-to-symbol ratio is too low (noise content)
+  const letters = (markdown.match(/[a-zA-Z]/g) || []).length;
+  const total = markdown.length;
+  if (total > 100 && letters / total < 0.4) return false;
+
+  return true;
 }
 
 function byteLength(text: string): number {
@@ -405,6 +458,16 @@ export async function queryAiSearchScoped(
   return queryAiSearch(scopedApplied.query, config);
 }
 
+function isAbortError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const error = err as { name?: string; message?: string };
+  if (error.name === 'AbortError') return true;
+  if (typeof error.message === 'string' && /aborted|abort/i.test(error.message)) {
+    return true;
+  }
+  return false;
+}
+
 async function queryAiSearch(
   options: AiSearchQueryOptions,
   config: Config
@@ -425,63 +488,88 @@ async function queryAiSearch(
   const url = `https://api.cloudflare.com/client/v4/accounts/${config.aiSearchAccountId}/autorag/rags/${encodeURIComponent(config.aiSearchName)}/${endpoint}`;
   const requestBody = buildQueryRequest(options);
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), config.aiSearchQueryTimeoutMs);
+  const timeouts = mode === 'ai_search'
+    ? [config.aiSearchQueryTimeoutMs, config.aiSearchQueryTimeoutMs * 2]
+    : [config.aiSearchQueryTimeoutMs];
+  let lastError: { code: string; message: string } | undefined;
 
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${config.aiSearchApiToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(requestBody),
-      signal: controller.signal,
-    });
+  for (let attempt = 0; attempt < timeouts.length; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeouts[attempt]);
 
-    const status = response.status;
-    const text = await response.text();
-    let parsed: unknown = text;
-    if (text) {
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        parsed = text;
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${config.aiSearchApiToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal,
+      });
+
+      const status = response.status;
+      const text = await response.text();
+      let parsed: unknown = text;
+      if (text) {
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          parsed = text;
+        }
       }
-    }
 
-    if (!response.ok) {
+      if (!response.ok) {
+        return {
+          mode,
+          request: requestBody,
+          status,
+          response: parsed,
+          error: {
+            code: 'AI_SEARCH_QUERY_FAILED',
+            message: `AI Search query failed with status ${status}`,
+            details: parsed,
+          },
+        };
+      }
+
       return {
         mode,
         request: requestBody,
         status,
         response: parsed,
-        error: {
-          code: 'AI_SEARCH_QUERY_FAILED',
-          message: `AI Search query failed with status ${status}`,
-          details: parsed,
-        },
       };
-    }
+    } catch (err) {
+      const timeoutError = isAbortError(err);
+      const message = timeoutError
+        ? 'AI Search query timed out'
+        : err instanceof Error
+          ? err.message
+          : 'AI Search query failed';
+      lastError = { code: 'AI_SEARCH_QUERY_FAILED', message };
 
-    return {
-      mode,
-      request: requestBody,
-      status,
-      response: parsed,
-    };
-  } catch (err) {
-    return {
-      mode,
-      request: requestBody,
-      error: {
-        code: 'AI_SEARCH_QUERY_FAILED',
-        message: err instanceof Error ? err.message : 'AI Search query failed',
-      },
-    };
-  } finally {
-    clearTimeout(timeout);
+      if (timeoutError && attempt < timeouts.length - 1) {
+        continue;
+      }
+
+      return {
+        mode,
+        request: requestBody,
+        error: lastError,
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
   }
+
+  return {
+    mode,
+    request: requestBody,
+    error: lastError ?? {
+      code: 'AI_SEARCH_QUERY_FAILED',
+      message: 'AI Search query failed',
+    },
+  };
 }
 
 function clampWaitMs(waitMs: number, config: Config): number {
@@ -635,6 +723,21 @@ export async function ingestPacketToAiSearch(
   const effectivePrefix = `${scope.upload_prefix}${normalizePrefix(options.prefix ?? '')}`;
   const keyBase = buildKeyBase(packet, effectivePrefix);
   const keyPrefix = `${keyBase}/${packet.hashes.content_hash}`;
+
+  // Quality gate: skip upload if content is too noisy for useful indexing
+  if (!isCleanContent(packet.content)) {
+    return {
+      enabled: true,
+      uploaded: false,
+      skipped_quality: true,
+      bucket: config.aiSearchR2Bucket,
+      prefix: keyPrefix,
+      keys: [],
+      bytes: 0,
+      parts: 0,
+      warning: 'AI Search upload skipped: content quality too low for indexing',
+    };
+  }
 
   // Split content by max bytes
   let parts: string[] = [];

@@ -16,6 +16,9 @@ import type {
   KeyBlock,
 } from '../types.js';
 import { estimateTokens, truncateToTokens } from '../utils/tokens.js';
+import { expandWithSynonyms } from './synonyms.js';
+import { isAiGatewayConfigured, chatCompletion } from '../ai-gateway/client.js';
+import type { ChatMessage } from '../ai-gateway/client.js';
 
 interface SectionScore {
   index: number;
@@ -75,6 +78,8 @@ export function compactContent(
     }
   }
 
+  result = enforceCompactionTokenLimit(result, max_tokens);
+
   return {
     source_id: sourceId,
     original_url: originalUrl,
@@ -85,7 +90,175 @@ export function compactContent(
       omissions: result.omissions,
       warnings: result.warnings,
     },
-    est_tokens: estimateTokens(result.summary + result.keyPoints.map(k => k.text).join(' ')),
+    est_tokens: estimateCompactionTokens(result.summary, result.keyPoints, result.importantQuotes),
+  };
+}
+
+/**
+ * Async compaction — uses AI Gateway LLM for map_reduce and question_focused
+ * modes when configured, falls back to heuristic compaction otherwise.
+ */
+export async function compactContentAsync(
+  input: LLMPacket | ChunkSet,
+  options: CompactOptions
+): Promise<CompactedPacket> {
+  const mode = options.mode ?? 'structural';
+  const useLlm = isAiGatewayConfigured() && (mode === 'map_reduce' || mode === 'question_focused');
+
+  if (!useLlm) {
+    return compactContent(input, options);
+  }
+
+  const { sourceId, originalUrl, content, chunks, keyBlocks } = extractInput(input);
+  const maxTokens = options.max_tokens;
+  const preserve = options.preserve ?? ['numbers', 'dates', 'names'];
+
+  try {
+    let result: CompactionResult;
+    if (mode === 'map_reduce') {
+      result = await llmMapReduceCompaction(content, chunks, maxTokens, preserve, keyBlocks);
+    } else {
+      result = await llmQuestionFocusedCompaction(content, chunks, maxTokens, preserve, keyBlocks, options.question);
+    }
+
+    const summaryTokens = estimateTokens(result.summary);
+    if (summaryTokens > maxTokens) {
+      const truncated = truncateToTokens(result.summary, maxTokens);
+      if (truncated.truncated) {
+        result.summary = truncated.text;
+        result.warnings.push('Summary truncated to fit token budget');
+      }
+    }
+
+    result = enforceCompactionTokenLimit(result, maxTokens);
+
+    return {
+      source_id: sourceId,
+      original_url: originalUrl,
+      compacted: {
+        summary: result.summary,
+        key_points: result.keyPoints,
+        important_quotes: result.importantQuotes,
+        omissions: result.omissions,
+        warnings: result.warnings,
+      },
+      est_tokens: estimateCompactionTokens(result.summary, result.keyPoints, result.importantQuotes),
+    };
+  } catch (err) {
+    // Fall back to heuristic compaction on LLM failure
+    const fallback = compactContent(input, options);
+    fallback.compacted.warnings.push(
+      `LLM compaction failed, used heuristic fallback: ${err instanceof Error ? err.message : 'unknown error'}`
+    );
+    return fallback;
+  }
+}
+
+async function llmMapReduceCompaction(
+  content: string,
+  chunks: string[],
+  maxTokens: number,
+  preserve: PreserveType[],
+  keyBlocks: KeyBlock[],
+): Promise<CompactionResult> {
+  const warnings: string[] = [];
+  const preserveNote = preserve.length > 0
+    ? `Preserve: ${preserve.join(', ')}.`
+    : '';
+
+  // Map: summarize each chunk via LLM
+  const perChunkBudget = Math.floor(maxTokens / Math.max(1, chunks.length));
+  const chunkSummaries: string[] = [];
+
+  for (const chunk of chunks) {
+    if (estimateTokens(chunk) <= perChunkBudget) {
+      chunkSummaries.push(chunk);
+      continue;
+    }
+
+    const messages: ChatMessage[] = [
+      {
+        role: 'developer',
+        content: `You are a precise content compactor. Summarize the given text into approximately ${perChunkBudget} tokens. Keep key facts, structure, and markdown formatting. ${preserveNote} Output only the summary, no preamble.`,
+      },
+      { role: 'user', content: chunk },
+    ];
+
+    const result = await chatCompletion(messages, {
+      max_completion_tokens: perChunkBudget * 2,
+      reasoning_effort: 'low',
+    });
+    chunkSummaries.push(result.content);
+  }
+
+  let combined = chunkSummaries.filter(s => s.trim()).join('\n\n');
+
+  // Reduce: if still over budget, compress the merged result
+  if (estimateTokens(combined) > maxTokens) {
+    const messages: ChatMessage[] = [
+      {
+        role: 'developer',
+        content: `You are a precise content compactor. Compress this text to fit within ${maxTokens} tokens. Merge overlapping information, keep key facts and structure. ${preserveNote} Output only the compressed text, no preamble.`,
+      },
+      { role: 'user', content: combined },
+    ];
+
+    const result = await chatCompletion(messages, {
+      max_completion_tokens: maxTokens * 2,
+      reasoning_effort: 'low',
+    });
+    combined = result.content;
+  }
+
+  warnings.push(`LLM map-reduce over ${chunks.length} chunks`);
+
+  return {
+    summary: combined,
+    keyPoints: extractKeyPoints(combined, preserve, keyBlocks),
+    importantQuotes: extractQuotes(content, keyBlocks),
+    omissions: [`Combined ${chunks.length} chunks via LLM map-reduce`],
+    warnings,
+  };
+}
+
+async function llmQuestionFocusedCompaction(
+  content: string,
+  chunks: string[],
+  maxTokens: number,
+  preserve: PreserveType[],
+  keyBlocks: KeyBlock[],
+  question?: string,
+): Promise<CompactionResult> {
+  if (!question) {
+    return salienceCompaction(content, chunks, maxTokens, preserve, keyBlocks);
+  }
+
+  const preserveNote = preserve.length > 0
+    ? `Preserve: ${preserve.join(', ')}.`
+    : '';
+
+  const messages: ChatMessage[] = [
+    {
+      role: 'developer',
+      content: `You are a precise content extractor. Given source text and a question, extract only the information relevant to answering the question. Keep it within approximately ${maxTokens} tokens. Maintain markdown formatting and key facts. ${preserveNote} Output only the relevant extracted content, no preamble.`,
+    },
+    {
+      role: 'user',
+      content: `Question: ${question}\n\n---\n\nSource text:\n${content}`,
+    },
+  ];
+
+  const result = await chatCompletion(messages, {
+    max_completion_tokens: maxTokens * 2,
+    reasoning_effort: 'low',
+  });
+
+  return {
+    summary: result.content,
+    keyPoints: extractKeyPoints(result.content, preserve, keyBlocks),
+    importantQuotes: extractQuotes(content, keyBlocks),
+    omissions: [`Focused on question: "${question.substring(0, 50)}..."`],
+    warnings: ['LLM question-focused compaction'],
   };
 }
 
@@ -95,6 +268,140 @@ interface CompactionResult {
   importantQuotes: CompactedKeyPoint[];
   omissions: string[];
   warnings: string[];
+}
+
+function estimateCompactionTokens(
+  summary: string,
+  keyPoints: CompactedKeyPoint[],
+  importantQuotes: CompactedKeyPoint[]
+): number {
+  const parts = [
+    summary,
+    ...keyPoints.map(point => point.text),
+    ...importantQuotes.map(point => point.text),
+  ].filter(Boolean);
+  return estimateTokens(parts.join(' '));
+}
+
+function enforceCompactionTokenLimit(
+  result: CompactionResult,
+  maxTokens: number
+): CompactionResult {
+  let limited: CompactionResult = {
+    summary: result.summary,
+    keyPoints: [...result.keyPoints],
+    importantQuotes: [...result.importantQuotes],
+    omissions: result.omissions,
+    warnings: result.warnings,
+  };
+
+  let totalTokens = estimateCompactionTokens(
+    limited.summary,
+    limited.keyPoints,
+    limited.importantQuotes
+  );
+  if (totalTokens <= maxTokens) {
+    return limited;
+  }
+
+  while (limited.importantQuotes.length > 0 && totalTokens > maxTokens) {
+    limited.importantQuotes.pop();
+    totalTokens = estimateCompactionTokens(
+      limited.summary,
+      limited.keyPoints,
+      limited.importantQuotes
+    );
+  }
+
+  while (limited.keyPoints.length > 0 && totalTokens > maxTokens) {
+    limited.keyPoints.pop();
+    totalTokens = estimateCompactionTokens(
+      limited.summary,
+      limited.keyPoints,
+      limited.importantQuotes
+    );
+  }
+
+  if (totalTokens > maxTokens) {
+    const nonSummaryTokens = estimateCompactionTokens(
+      '',
+      limited.keyPoints,
+      limited.importantQuotes
+    );
+    const summaryBudget = Math.max(0, maxTokens - nonSummaryTokens);
+    limited.summary = summaryBudget > 0
+      ? truncateToTokens(limited.summary, summaryBudget).text
+      : '';
+  }
+
+  return limited;
+}
+
+function normalizeChunkTexts(chunks: unknown[]): string[] {
+  const texts: string[] = [];
+
+  for (const chunk of chunks) {
+    if (typeof chunk === 'string') {
+      if (chunk.trim()) {
+        texts.push(chunk);
+      }
+      continue;
+    }
+
+    if (chunk && typeof chunk === 'object' && 'text' in chunk) {
+      const value = (chunk as { text?: unknown }).text;
+      if (typeof value === 'string' && value.trim()) {
+        texts.push(value);
+        continue;
+      }
+    }
+
+    throw new Error('Chunk items must be strings or objects with a text field');
+  }
+
+  return texts;
+}
+
+function stripLeadingChunkOverlap(previous: string, current: string): string {
+  const prev = previous.trim();
+  const curr = current.trim();
+
+  if (!prev || !curr) {
+    return curr;
+  }
+
+  const maxOverlapLength = Math.min(prev.length, curr.length);
+  for (let length = maxOverlapLength; length > 0; length--) {
+    const suffix = prev.slice(-length);
+    if (!curr.startsWith(suffix)) {
+      continue;
+    }
+
+    return curr.slice(length).replace(/^\s+/, '');
+  }
+
+  return curr;
+}
+
+function removeChunkBoundaryOverlap(chunks: string[]): string[] {
+  const deduped: string[] = [];
+
+  for (const chunk of chunks) {
+    const trimmed = chunk.trim();
+    if (!trimmed) continue;
+
+    if (deduped.length === 0) {
+      deduped.push(trimmed);
+      continue;
+    }
+
+    const stripped = stripLeadingChunkOverlap(deduped[deduped.length - 1]!, trimmed);
+    if (stripped) {
+      deduped.push(stripped);
+    }
+  }
+
+  return deduped;
 }
 
 /**
@@ -109,11 +416,17 @@ function extractInput(input: LLMPacket | ChunkSet): {
 } {
   if (isChunkSet(input)) {
     const chunkSet = input;
+    if (typeof chunkSet.source_id !== 'string') {
+      throw new Error('Compact input must include source_id');
+    }
+    const chunkTexts = removeChunkBoundaryOverlap(
+      normalizeChunkTexts(chunkSet.chunks as unknown[])
+    );
     return {
       sourceId: chunkSet.source_id,
       originalUrl: chunkSet.original_url ?? '',
-      content: chunkSet.chunks.map(c => c.text).join('\n\n'),
-      chunks: chunkSet.chunks.map(c => c.text),
+      content: chunkTexts.join('\n\n'),
+      chunks: chunkTexts,
       keyBlocks: chunkSet.key_blocks ?? [],
     };
   }
@@ -302,11 +615,17 @@ function mapReduceCompaction(
   });
 
   // Reduce: combine summaries
-  let combinedSummary = chunkSummaries.map(c => c.summary).join('\n\n').trim();
+  const nonEmptySummaries = chunkSummaries
+    .map(c => c.summary)
+    .filter(summary => summary && summary.trim().length > 0);
+  let combinedSummary = nonEmptySummaries.join('\n\n').trim();
 
-  if (!combinedSummary && content.trim()) {
+  const fallbackContent = content.trim() ? content : chunks.filter(c => c && c.trim().length > 0).join('\n\n');
+  if (!combinedSummary && fallbackContent.trim()) {
     warnings.push('Map-reduce produced empty chunk summaries; falling back to truncated content');
-    combinedSummary = truncateToTokens(content, Math.max(1, maxTokens)).text;
+    combinedSummary = truncateToTokens(fallbackContent, Math.max(1, maxTokens)).text;
+  } else if (nonEmptySummaries.length < chunkSummaries.length) {
+    warnings.push('Some chunk summaries were empty and were skipped during map-reduce');
   }
 
   // If still too long, compress further
@@ -314,6 +633,12 @@ function mapReduceCompaction(
     const sentences = splitIntoSentences(combinedSummary);
     // Remove least important sentences
     const scored = sentences.map((s, i) => ({ text: s, score: scoreSentenceSalience(s, preserve), index: i }));
+    // Boost sentences that follow a heading (lead paragraph)
+    for (let i = 1; i < scored.length; i++) {
+      if (isHeadingLine(scored[i - 1]!.text.trim())) {
+        scored[i]!.score += 2;
+      }
+    }
     scored.sort((a, b) => b.score - a.score);
 
     const targetLength = Math.floor(sentences.length * 0.8);
@@ -376,64 +701,87 @@ function questionFocusedCompaction(
     return fallback;
   }
 
-  const scoredSentences = sentences.map((sentence, idx) => {
-    const neighborMatches = (termMatches[idx - 1] ?? 0) + (termMatches[idx + 1] ?? 0);
+  const matchIndexes = termMatches
+    .map((count, idx) => (count > 0 ? idx : -1))
+    .filter(idx => idx >= 0);
+
+  const includedSentences: SectionScore[] = [];
+  let currentTokens = 0;
+
+  const headingIndexes = sentences
+    .map((sentence, idx) => (isHeadingLine(sentence.trim()) ? idx : -1))
+    .filter(idx => idx >= 0);
+
+  const candidateSet = new Set<number>();
+
+  const addSectionRange = (start: number, end: number): void => {
+    for (let i = start; i < end; i++) {
+      candidateSet.add(i);
+    }
+  };
+
+  if (headingIndexes.length > 0) {
+    for (const matchIdx of matchIndexes) {
+      let sectionStart = 0;
+      for (const headingIdx of headingIndexes) {
+        if (headingIdx <= matchIdx) {
+          sectionStart = headingIdx;
+        } else {
+          break;
+        }
+      }
+
+      let sectionEnd = sentences.length;
+      for (const headingIdx of headingIndexes) {
+        if (headingIdx > matchIdx) {
+          sectionEnd = headingIdx;
+          break;
+        }
+      }
+
+      addSectionRange(sectionStart, sectionEnd);
+    }
+  } else {
+    for (const matchIdx of matchIndexes) {
+      for (let offset = -1; offset <= 1; offset++) {
+        const candidate = matchIdx + offset;
+        if (candidate >= 0 && candidate < sentences.length) {
+          candidateSet.add(candidate);
+        }
+      }
+    }
+  }
+
+  const scoredCandidates = Array.from(candidateSet).map(index => {
+    const neighborMatches = (termMatches[index - 1] ?? 0) + (termMatches[index + 1] ?? 0);
     return {
-      index: idx,
-      text: sentence,
-      score: scoreRelevance(sentence, preserve, termMatches[idx] ?? 0, neighborMatches),
+      index,
+      text: sentences[index] ?? '',
+      score: scoreRelevance(sentences[index] ?? '', preserve, termMatches[index] ?? 0, neighborMatches),
       reasons: [],
-      matchCount: termMatches[idx] ?? 0,
+      matchCount: termMatches[index] ?? 0,
     };
   });
 
-  // Sort by relevance
-  scoredSentences.sort((a, b) => {
-    if (b.score !== a.score) return b.score - a.score;
+  scoredCandidates.sort((a, b) => {
     if ((b.matchCount ?? 0) !== (a.matchCount ?? 0)) {
       return (b.matchCount ?? 0) - (a.matchCount ?? 0);
     }
+    if (b.score !== a.score) return b.score - a.score;
     return a.index - b.index;
   });
 
-  // Select most relevant sentences
-  const includedSentences: SectionScore[] = [];
-  let currentTokens = 0;
-  const includedIndexes = new Set<number>();
-
-  for (const sentence of scoredSentences) {
+  for (const sentence of scoredCandidates) {
     const sentenceTokens = estimateTokens(sentence.text);
-
     if (currentTokens + sentenceTokens <= maxTokens) {
       includedSentences.push(sentence);
       currentTokens += sentenceTokens;
-      includedIndexes.add(sentence.index);
     }
   }
 
   const minTokens = Math.floor(maxTokens * 0.7);
   if (currentTokens < minTokens) {
-    const fallbackCandidates = sentences.map((sentence, idx) => ({
-      index: idx,
-      text: sentence,
-      score: scoreSentenceSalience(sentence, preserve),
-      reasons: [],
-    }));
-    fallbackCandidates.sort((a, b) => {
-      if (b.score !== a.score) return b.score - a.score;
-      return a.index - b.index;
-    });
-
-    for (const sentence of fallbackCandidates) {
-      if (includedIndexes.has(sentence.index)) continue;
-      const sentenceTokens = estimateTokens(sentence.text);
-      if (currentTokens + sentenceTokens <= maxTokens) {
-        includedSentences.push(sentence);
-        currentTokens += sentenceTokens;
-        includedIndexes.add(sentence.index);
-      }
-      if (currentTokens >= minTokens) break;
-    }
+    warnings.push('Limited question matches; summary may be shorter than token budget');
   }
 
   // Sort by original order
@@ -620,7 +968,7 @@ function scoreSentenceSalience(sentence: string, preserve: PreserveType[]): numb
   if (/according to|reported|announced|discovered|found that/i.test(sentence)) score += 1;
   if (/\$[\d,]+|percent|\d+%/i.test(sentence)) score += 2;
 
-  if (isHeadingLine(trimmed)) score += 3;
+  if (isHeadingLine(trimmed)) score += 1;
   if (isListLine(trimmed)) score += 1;
 
   return score;
@@ -646,6 +994,12 @@ function summarizeChunk(chunk: string, maxTokens: number, preserve: PreserveType
     score: scoreSentenceSalience(s, preserve),
     index: i,
   }));
+  // Boost sentences that follow a heading (lead paragraph)
+  for (let i = 1; i < scored.length; i++) {
+    if (isHeadingLine(scored[i - 1]!.text.trim())) {
+      scored[i]!.score += 2;
+    }
+  }
   scored.sort((a, b) => b.score - a.score);
 
   let result: typeof scored = [];
@@ -686,9 +1040,12 @@ function extractKeyPoints(text: string, preserve: PreserveType[], keyBlocks: Key
   const seen = new Set<string>();
 
   for (const sentence of sentences) {
+    const trimmed = sentence.trim();
+    // Exclude bare headings — they're structural, not key points
+    if (isHeadingLine(trimmed)) continue;
     const score = scoreSentenceSalience(sentence, preserve);
     const normalized = normalizeSentence(sentence);
-    if (score >= 2 && normalized && !seen.has(normalized)) {
+    if (score >= 3 && normalized && !seen.has(normalized)) {
       seen.add(normalized);
       keyPoints.push({
         text: sentence,
@@ -713,25 +1070,55 @@ function extractQuotes(content: string, keyBlocks: KeyBlock[]): CompactedKeyPoin
       char_len: content.length,
     } as KeyBlock];
 
+  // Match straight double, smart double, straight single, smart single quotes
+  const quotePatterns: { pattern: RegExp; wrap: (s: string) => string }[] = [
+    { pattern: /"([^"]{20,200})"/g, wrap: s => `"${s}"` },
+    { pattern: /\u201c([^\u201d]{20,200})\u201d/g, wrap: s => `\u201c${s}\u201d` },
+    { pattern: /\u2018([^\u2019]{20,200})\u2019/g, wrap: s => `'${s}'` },
+  ];
+
   for (const source of sources) {
     const cleaned = stripInlineCode(stripCodeBlocks(source.text));
     if (!cleaned.trim()) continue;
 
     for (const line of cleaned.split('\n')) {
       if (isJsonLikeLine(line)) continue;
-      const quoteMatches = line.matchAll(/"([^"]{20,200})"/g);
-      for (const match of quoteMatches) {
-        const raw = match[1]?.trim();
-        if (!raw || !isLikelyQuote(raw)) continue;
-        const normalized = normalizeSentence(raw);
-        if (normalized && seen.has(normalized)) continue;
-        if (normalized) seen.add(normalized);
-        quotes.push({
-          text: `"${raw}"`,
-          citation: findCitationForText(raw, keyBlocks),
-        });
-        if (quotes.length >= 5) {
-          return quotes;
+
+      for (const { pattern, wrap } of quotePatterns) {
+        // Reset lastIndex for global regexes reused across lines
+        pattern.lastIndex = 0;
+        const matches = line.matchAll(pattern);
+        for (const match of matches) {
+          const raw = match[1]?.trim();
+          if (!raw || !isLikelyQuote(raw)) continue;
+          const normalized = normalizeSentence(raw);
+          if (normalized && seen.has(normalized)) continue;
+          if (normalized) seen.add(normalized);
+          quotes.push({
+            text: wrap(raw),
+            citation: findCitationForText(raw, keyBlocks),
+          });
+          if (quotes.length >= 5) {
+            return quotes;
+          }
+        }
+      }
+
+      // Also match markdown blockquotes
+      if (line.startsWith('> ')) {
+        const quoteText = line.replace(/^>\s*/, '').trim();
+        if (quoteText.length >= 20 && quoteText.length <= 200 && isLikelyQuote(quoteText)) {
+          const normalized = normalizeSentence(quoteText);
+          if (normalized && !seen.has(normalized)) {
+            seen.add(normalized);
+            quotes.push({
+              text: `> ${quoteText}`,
+              citation: findCitationForText(quoteText, keyBlocks),
+            });
+            if (quotes.length >= 5) {
+              return quotes;
+            }
+          }
         }
       }
     }
@@ -961,6 +1348,11 @@ function expandTermVariants(term: string): string[] {
 
   if (term.endsWith('ies') && term.length > 4) {
     variants.add(term.slice(0, -3) + 'y');
+  }
+
+  // Synonym expansion for semantic matching
+  for (const synonym of expandWithSynonyms(term)) {
+    variants.add(synonym);
   }
 
   return [...variants].filter(v => v.length > 1);

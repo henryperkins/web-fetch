@@ -15,6 +15,8 @@ import type {
   ContentTypeInfo,
   RawFetchResult,
   NormalizedContent,
+  ExtractionOptions,
+  FormatOptions,
 } from '../types.js';
 import { sha256, generateSourceId, generateBlockId } from '../utils/hash.js';
 import { normalizeUrl } from '../utils/url.js';
@@ -27,7 +29,6 @@ import { extractPdf } from '../extractors/pdf-extractor.js';
 import { extractJson } from '../extractors/json-extractor.js';
 import { extractXml } from '../extractors/xml-extractor.js';
 import { extractText } from '../extractors/text-extractor.js';
-import type { ExtractionOptions, FormatOptions } from '../types.js';
 
 export interface NormalizeOptions {
   extraction?: ExtractionOptions;
@@ -318,26 +319,70 @@ function extractKeyBlocks(markdown: string): KeyBlock[] {
   return blocks;
 }
 
+const MAX_KEY_BLOCKS = 20;
+const MIN_BLOCK_CHAR_LEN = 50;
+
+/**
+ * Filter key blocks to keep only the most relevant ones for large documents.
+ */
+function filterKeyBlocks(blocks: KeyBlock[]): KeyBlock[] {
+  if (blocks.length <= MAX_KEY_BLOCKS) {
+    return blocks;
+  }
+
+  const kept = new Set<number>();
+
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i]!;
+    // Always keep headings, code blocks, and tables
+    if (block.kind === 'heading' || block.kind === 'code' || block.kind === 'table') {
+      kept.add(i);
+      continue;
+    }
+    // Keep substantial paragraphs/lists/quotes
+    if (block.char_len >= MIN_BLOCK_CHAR_LEN) {
+      kept.add(i);
+      continue;
+    }
+    // Keep first 3 and last 1 blocks for intro/conclusion context
+    if (i < 3 || i === blocks.length - 1) {
+      kept.add(i);
+    }
+  }
+
+  const filtered = blocks.filter((_, i) => kept.has(i));
+  return filtered.slice(0, MAX_KEY_BLOCKS);
+}
+
 /**
  * Generate source summary from content
  */
 function generateSourceSummary(content: string, outline: OutlineEntry[]): string[] {
   const summary: string[] = [];
 
-  // Add main topics from outline
+  // Add main topics — prefer TF-extracted terms over generic headings
   const topLevel = outline.filter(e => e.level <= 2).slice(0, 5);
-  if (topLevel.length > 0) {
+  const genericPatterns = /^(recent items|feed info|navigation|contents|introduction|overview|summary|main|home|menu|sidebar|footer|header)$/i;
+  const substantiveHeadings = topLevel.filter(e => e.text.split(/\s+/).length >= 3 && !genericPatterns.test(e.text.trim()));
+
+  if (substantiveHeadings.length > 0) {
+    summary.push(`Main topics: ${substantiveHeadings.map(e => e.text).join(', ')}`);
+  }
+
+  // Always extract topic terms from body text via term frequency
+  const topicTerms = extractTopicTerms(content);
+  if (topicTerms.length > 0) {
+    summary.push(`Key topics: ${topicTerms.join(', ')}`);
+  } else if (substantiveHeadings.length === 0 && topLevel.length > 0) {
+    // Fallback to heading names if TF extraction found nothing
     summary.push(`Main topics: ${topLevel.map(e => e.text).join(', ')}`);
   }
 
-  // Extract key facts (numbers, dates, names in first few paragraphs)
-  const firstPart = content.substring(0, 2000);
-
-  // Find numbers with context
-  const numberMatches = firstPart.match(/\d+(?:,\d{3})*(?:\.\d+)?%?|\$\d+(?:,\d{3})*(?:\.\d+)?[KMB]?/g);
-  if (numberMatches && numberMatches.length > 0) {
-    const uniqueNumbers = [...new Set(numberMatches)].slice(0, 5);
-    summary.push(`Key numbers mentioned: ${uniqueNumbers.join(', ')}`);
+  // Extract key figures — numbers with meaningful context only
+  const firstPart = content.substring(0, 3000);
+  const contextualNumbers = extractContextualNumbers(firstPart);
+  if (contextualNumbers.length > 0) {
+    summary.push(`Key figures: ${contextualNumbers.join(', ')}`);
   }
 
   // Find dates
@@ -352,6 +397,74 @@ function generateSourceSummary(content: string, outline: OutlineEntry[]): string
   summary.push(`Content length: ~${wordCount} words`);
 
   return summary;
+}
+
+const SUMMARY_STOP_WORDS = new Set([
+  'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+  'of', 'with', 'by', 'from', 'is', 'are', 'was', 'were', 'be', 'been',
+  'has', 'have', 'had', 'this', 'that', 'it', 'its', 'not', 'more',
+  'than', 'will', 'can', 'would', 'could', 'should', 'also', 'as',
+  'about', 'which', 'who', 'what', 'when', 'where', 'how', 'their',
+  'there', 'they', 'them', 'he', 'she', 'his', 'her', 'our', 'your',
+  'all', 'some', 'any', 'most', 'other', 'into', 'over', 'after',
+  'before', 'between', 'under', 'new', 'said', 'says', 'just', 'been',
+  'out', 'up', 'one', 'two', 'three', 'may', 'like', 'being', 'does',
+  'did', 'get', 'got', 'make', 'made', 'back', 'still', 'own', 'such',
+  // Markdown/URL noise
+  'read', 'http', 'https', 'www', 'com', 'html', 'org', 'more', 'here',
+]);
+
+function extractTopicTerms(content: string, maxTerms: number = 8): string[] {
+  // Strip markdown links (keep link text), headings markers, and URLs
+  const cleaned = content
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/https?:\/\/\S+/g, '');
+
+  const freq = new Map<string, number>();
+  const words = cleaned.toLowerCase().match(/[a-z]{3,}/g) || [];
+
+  for (const word of words) {
+    if (SUMMARY_STOP_WORDS.has(word)) continue;
+    freq.set(word, (freq.get(word) || 0) + 1);
+  }
+
+  return [...freq.entries()]
+    .filter(([_, count]) => count >= 2)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, maxTerms)
+    .map(([word]) => word);
+}
+
+function extractContextualNumbers(text: string): string[] {
+  const results: string[] = [];
+  const seen = new Set<string>();
+
+  const patterns: RegExp[] = [
+    // Currency: $53m, £53m, $1,000
+    /[£$€]\d+(?:,\d{3})*(?:\.\d+)?[KMBkmb]?/g,
+    // Percentages: 15%, 3.5%
+    /\d+(?:\.\d+)?\s*%/g,
+    // Number + unit: "700 jobs", "11 people", "53m pounds"
+    /\d+(?:,\d{3})*(?:\.\d+)?\s*(?:million|billion|trillion|people|jobs|deaths|cases|patients|users|troops|soldiers|miles|kilometers|tonnes|pounds|dollars|euros|percent|years|months|days|hours)\b/gi,
+    // Qualified numbers: "nearly 700", "over 11", "about 53"
+    /(?:approximately|about|nearly|over|under|around|roughly|more than|fewer than|at least)\s+\d+(?:,\d{3})*(?:\.\d+)?/gi,
+  ];
+
+  for (const pattern of patterns) {
+    const matches = text.match(pattern);
+    if (matches) {
+      for (const match of matches) {
+        const trimmed = match.trim();
+        if (!seen.has(trimmed)) {
+          seen.add(trimmed);
+          results.push(trimmed);
+        }
+      }
+    }
+  }
+
+  return results.slice(0, 5);
 }
 
 /**
@@ -480,8 +593,9 @@ export async function normalizeContent(
     // Generate outline
     const outline = generateOutline(markdown);
 
-    // Extract key blocks
-    const keyBlocks = extractKeyBlocks(markdown);
+    // Extract key blocks — filter and cap for large documents
+    const allBlocks = extractKeyBlocks(markdown);
+    const keyBlocks = filterKeyBlocks(allBlocks);
 
     // Generate summary
     const sourceSummary = generateSourceSummary(markdown, outline);

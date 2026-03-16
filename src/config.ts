@@ -55,6 +55,10 @@ export function loadConfig(): Config {
     renderBlockThirdParty: parseBoolean(process.env['RENDER_BLOCK_THIRD_PARTY'], true),
     renderTimeoutMs: parseNumber(process.env['RENDER_TIMEOUT_MS'], 60000),
     userAgent: process.env['USER_AGENT'] || 'web-fetch-mcp/1.0 (+https://github.com/example/web-fetch-mcp)',
+    aiGatewayEndpoint: process.env['CF_AI_GATEWAY_ENDPOINT'],
+    aiGatewayToken: process.env['CF_AIG_TOKEN'],
+    aiGatewayModel: process.env['CF_AI_GATEWAY_MODEL'],
+    aiGatewayTimeoutMs: parseNumber(process.env['CF_AI_GATEWAY_TIMEOUT_MS'], 60000),
     aiSearchEnabled: parseBoolean(process.env['AI_SEARCH_ENABLED'], false),
     aiSearchScope: parseAiSearchScope(
       process.env['AI_SEARCH_SCOPE'] ?? process.env['WEB_FETCH_SESSION_SCOPE'],

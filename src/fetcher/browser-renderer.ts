@@ -8,12 +8,17 @@
 import type { Browser, Page, BrowserContext } from 'playwright';
 import { checkSSRF } from '../security/ssrf-guard.js';
 import { getConfig } from '../config.js';
-import type { RawFetchResult, RenderOptions } from '../types.js';
+import type { RawFetchResult, WaitUntil } from '../types.js';
 
 let browser: Browser | null = null;
 let browserInitPromise: Promise<Browser> | null = null;
 
-export interface BrowserRenderOptions extends RenderOptions {
+export interface BrowserRenderOptions {
+  wait_until?: WaitUntil;
+  wait_ms?: number;
+  block_third_party?: boolean;
+  screenshot?: boolean;
+  selector?: string;
   timeout_ms?: number;
   max_bytes?: number;
   user_agent?: string;

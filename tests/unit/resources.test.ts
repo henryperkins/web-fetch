@@ -8,7 +8,6 @@ import type { LLMPacket } from '../../src/types.js';
 import { ResourceStore } from '../../src/resources/store.js';
 import { buildResourceUri } from '../../src/resources/uri.js';
 import { listResources, listResourceTemplates, readResource } from '../../src/resources/handlers.js';
-import { toNormalizedContent } from '../../src/processing/normalizer.js';
 
 function createStore(): ResourceStore {
   return new ResourceStore({ defaultTtlMs: 1000, maxSize: 10 });
@@ -87,13 +86,15 @@ describe('resources', () => {
       }
       expect(contentBlock.text).toBe(packet.content);
 
-      const normalizedUri = buildResourceUri('normalized', packet.source_id);
-      const normalizedResult = readResource(store, normalizedUri);
-      const normalizedBlock = normalizedResult.contents[0];
-      if (!('text' in normalizedBlock)) {
-        throw new Error('expected text resource');
-      }
-      expect(JSON.parse(normalizedBlock.text)).toEqual(toNormalizedContent(packet));
+    const normalizedUri = buildResourceUri('normalized', packet.source_id);
+    const normalizedResult = readResource(store, normalizedUri);
+    const normalizedBlock = normalizedResult.contents[0];
+    if (!('text' in normalizedBlock)) {
+      throw new Error('expected text resource');
+    }
+    // Normalized content is packet without hashes
+    const { hashes: _hashes, ...expectedNormalized } = packet;
+    expect(JSON.parse(normalizedBlock.text)).toEqual(expectedNormalized);
 
       const screenshotUri = buildResourceUri('screenshot', packet.source_id);
       const screenshotResult = readResource(store, screenshotUri);

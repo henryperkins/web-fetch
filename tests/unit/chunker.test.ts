@@ -128,6 +128,66 @@ ${'Content paragraph with text. '.repeat(50)}`;
       }
     });
 
+    it('should split on sentence boundaries when possible', () => {
+      const content = [
+        'First sentence ends here.',
+        'this sentence starts lowercase.',
+        'Third sentence ends here.',
+        'Fourth sentence ends here.',
+      ].join(' ');
+
+      const packet = createTestPacket(content);
+      const result = chunkContent(packet, { max_tokens: 12, margin_ratio: 0, strategy: 'balanced' });
+
+      expect(result.total_chunks).toBeGreaterThan(1);
+      for (const chunk of result.chunks) {
+        const trimmed = chunk.text.trim();
+        expect(/[.!?]$/.test(trimmed)).toBe(true);
+      }
+    });
+
+    it('should include overlap between chunks when configured', () => {
+      const content = [
+        'Sentence one.',
+        'Sentence two.',
+        'Sentence three.',
+        'Sentence four.',
+      ].join(' ');
+
+      const packet = createTestPacket(content);
+      const result = chunkContent(packet, { max_tokens: 12, margin_ratio: 0, overlap_tokens: 4, strategy: 'balanced' });
+
+      expect(result.total_chunks).toBeGreaterThan(1);
+      const first = result.chunks[0]?.text ?? '';
+      const second = result.chunks[1]?.text ?? '';
+      const matches = first.trim().match(/[^.!?]+[.!?](?:\s+|$)/g) ?? [];
+      const lastSentence = matches.length > 0 ? matches[matches.length - 1]!.trim() : '';
+
+      expect(lastSentence.length).toBeGreaterThan(0);
+      expect(second.trim().startsWith(lastSentence)).toBe(true);
+    });
+
+    it('should keep overlapped chunks within the configured token budget', () => {
+      const content = [
+        'Sentence one is deliberately long and wordy so it exceeds a tiny overlap budget all by itself.',
+        'Sentence two is similarly verbose and forces additional chunk boundaries.',
+        'Sentence three adds even more content to keep splitting active.',
+      ].join(' ');
+
+      const packet = createTestPacket(content);
+      const result = chunkContent(packet, {
+        max_tokens: 20,
+        margin_ratio: 0,
+        overlap_tokens: 4,
+        strategy: 'balanced',
+      });
+
+      expect(result.total_chunks).toBeGreaterThan(1);
+      for (const chunk of result.chunks) {
+        expect(chunk.est_tokens).toBeLessThanOrEqual(20);
+      }
+    });
+
     it('should not split code blocks', () => {
       const content = `# Code Example
 
@@ -317,6 +377,57 @@ Back to apples again.`;
 
       const results = searchChunks(chunkSet, 'nonexistent');
       expect(results.length).toBe(0);
+    });
+  });
+
+  describe('key_blocks truncation guard', () => {
+    it('should fall back to content when key_blocks have truncated text', () => {
+      const fullContent = '## Heading\n\n' + 'The quick brown fox jumps over the lazy dog. '.repeat(20);
+      const packet = createTestPacket(fullContent);
+      // Simulate truncated key_blocks (e.g. from serialization or manual input)
+      packet.key_blocks = [
+        { block_id: 'b0', kind: 'heading', text: '## Heading', char_len: 10 },
+        { block_id: 'b1', kind: 'paragraph', text: 'The quick brown fox...', char_len: 22 },
+      ];
+
+      const chunkSet = chunkContent(packet, { max_tokens: 200 });
+      const totalChunkText = chunkSet.chunks.map(c => c.text).join(' ');
+
+      // Should use full content, not truncated key_blocks
+      expect(totalChunkText.length).toBeGreaterThan(100);
+      expect(totalChunkText).toContain('lazy dog');
+    });
+
+    it('should use key_blocks when they have full text', () => {
+      const fullContent = '## Heading\n\nFull paragraph text here.';
+      const packet = createTestPacket(fullContent);
+      packet.key_blocks = [
+        { block_id: 'b0', kind: 'heading', text: '## Heading', char_len: 10 },
+        { block_id: 'b1', kind: 'paragraph', text: 'Full paragraph text here.', char_len: 25 },
+      ];
+
+      const chunkSet = chunkContent(packet, { max_tokens: 200 });
+      const totalChunkText = chunkSet.chunks.map(c => c.text).join(' ');
+      expect(totalChunkText).toContain('Full paragraph text here');
+    });
+  });
+
+  describe('sentence boundary splitting', () => {
+    it('should split at sentence boundaries in dense prose', () => {
+      // Dense prose without paragraph breaks
+      const prose = 'First sentence about the topic. Second sentence with more details. Third sentence concludes the thought. Fourth sentence starts a new idea. Fifth sentence adds context. Sixth sentence wraps up.';
+      const packet = createTestPacket(prose);
+
+      const chunkSet = chunkContent(packet, { max_tokens: 30 });
+
+      // Each chunk should end at a sentence boundary (period)
+      for (const chunk of chunkSet.chunks) {
+        const trimmed = chunk.text.trim();
+        if (chunkSet.chunks.indexOf(chunk) < chunkSet.chunks.length - 1) {
+          // Non-final chunks should end with sentence-ending punctuation
+          expect(trimmed).toMatch(/[.!?]$/);
+        }
+      }
     });
   });
 });

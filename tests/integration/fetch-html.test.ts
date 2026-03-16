@@ -17,8 +17,8 @@ describe('HTML Fetch Integration', () => {
   // Using httpbin.org for reliable test endpoints
   it('should fetch and extract HTML from httpbin', async () => {
     const result = await executeFetch({
-      url: 'https://httpbin.org/html',
       options: {
+        url: 'https://httpbin.org/html',
         mode: 'http',
         timeout_ms: 30000,
       },
@@ -34,8 +34,8 @@ describe('HTML Fetch Integration', () => {
 
   it('should handle 404 errors', async () => {
     const result = await executeFetch({
-      url: 'https://httpbin.org/status/404',
       options: {
+        url: 'https://httpbin.org/status/404',
         mode: 'http',
         timeout_ms: 30000,
       },
@@ -47,8 +47,8 @@ describe('HTML Fetch Integration', () => {
 
   it('should follow redirects', async () => {
     const result = await executeFetch({
-      url: 'https://httpbin.org/redirect/2',
       options: {
+        url: 'https://httpbin.org/redirect/2',
         mode: 'http',
         max_redirects: 5,
         timeout_ms: 30000,
@@ -60,8 +60,8 @@ describe('HTML Fetch Integration', () => {
 
   it('should respect max_redirects limit', async () => {
     const result = await executeFetch({
-      url: 'https://httpbin.org/redirect/5',
       options: {
+        url: 'https://httpbin.org/redirect/5',
         mode: 'http',
         max_redirects: 2,
         timeout_ms: 30000,
@@ -74,8 +74,8 @@ describe('HTML Fetch Integration', () => {
 
   it('should block private IP addresses', async () => {
     const result = await executeFetch({
-      url: 'http://127.0.0.1:8080',
       options: {
+        url: 'http://127.0.0.1:8080',
         mode: 'http',
       },
     });
@@ -86,8 +86,8 @@ describe('HTML Fetch Integration', () => {
 
   it('should block localhost', async () => {
     const result = await executeFetch({
-      url: 'http://localhost:8080',
       options: {
+        url: 'http://localhost:8080',
         mode: 'http',
       },
     });
@@ -96,44 +96,26 @@ describe('HTML Fetch Integration', () => {
     expect(result.error?.code).toBe('SSRF_BLOCKED');
   });
 
-  it('should return raw format when requested', async () => {
+  it('should include raw excerpt when requested', async () => {
     const result = await executeFetch({
-      url: 'https://httpbin.org/html',
       options: {
+        url: 'https://httpbin.org/html',
         mode: 'http',
-        format: { output: 'raw' },
+        include_raw_excerpt: true,
         timeout_ms: 30000,
       },
     });
 
     expect(result.success).toBe(true);
-    expect(result.raw).toBeDefined();
-    expect(result.raw?.content_type).toContain('text/html');
-    expect(result.raw?.bytes_length).toBeGreaterThan(0);
-    expect(result.packet).toBeUndefined();
-  }, 30000);
-
-  it('should return normalized format when requested', async () => {
-    const result = await executeFetch({
-      url: 'https://httpbin.org/html',
-      options: {
-        mode: 'http',
-        format: { output: 'normalized' },
-        timeout_ms: 30000,
-      },
-    });
-
-    expect(result.success).toBe(true);
-    expect(result.normalized).toBeDefined();
-    expect(result.packet).toBeUndefined();
-    expect(result.normalized?.content_type).toContain('text/html');
-    expect(result.normalized?.content).toContain('Herman Melville');
+    expect(result.packet).toBeDefined();
+    expect(result.packet?.raw_excerpt).toBeDefined();
+    expect(result.packet?.raw_excerpt?.length).toBeGreaterThan(0);
   }, 30000);
 
   it('should extract metadata from HTML', async () => {
     const result = await executeFetch({
-      url: 'https://httpbin.org/html',
       options: {
+        url: 'https://httpbin.org/html',
         mode: 'http',
         timeout_ms: 30000,
       },
@@ -146,8 +128,8 @@ describe('HTML Fetch Integration', () => {
 
   it('should generate outline from headings', async () => {
     const result = await executeFetch({
-      url: 'https://httpbin.org/html',
       options: {
+        url: 'https://httpbin.org/html',
         mode: 'http',
         timeout_ms: 30000,
       },

@@ -24,6 +24,7 @@ import {
 
 import { loadConfig, validateConfig, getConfig } from './config.js';
 import { executeFetch, getFetchInputSchema } from './tools/fetch.js';
+import { parseFetchToolArguments } from './tools/fetch-contract.js';
 import { executeExtract, getExtractInputSchema } from './tools/extract.js';
 import { executeChunk, getChunkInputSchema } from './tools/chunk.js';
 import { executeCompact, getCompactInputSchema } from './tools/compact.js';
@@ -134,6 +135,16 @@ function parseJsonArgument(value: string | undefined): unknown | undefined {
     }
   }
   return value;
+}
+
+function coerceJsonRecord(value: unknown, label: string): Record<string, unknown> {
+  if (typeof value === 'string') {
+    const parsed = parseJsonArgument(value);
+    if (parsed !== undefined) {
+      value = parsed;
+    }
+  }
+  return requireRecord(value, label);
 }
 
 function parseNumberArgument(value: string | undefined): number | string | undefined {
@@ -347,7 +358,8 @@ function buildResourcesTipsPrompt(): string {
 const TOOLS = [
   {
     name: 'fetch',
-    description: `Fetch and extract content from a URL. Supports HTML, JavaScript-rendered pages (SPA), Markdown, PDF, JSON, and XML/RSS feeds.
+    title: 'Fetch Content',
+    description: `Fetch and extract content from a URL or raw bytes. Supports HTML, JavaScript-rendered pages (SPA), Markdown, PDF, JSON, and XML/RSS feeds.
 
 Returns an LLMPacket with:
 - Normalized markdown content
@@ -361,9 +373,17 @@ Security: Blocks private IPs, respects robots.txt, rate limits per host.
 
 After success, retrieve cached content via: mcp__web-fetch.read_mcp_resource({"uri": "webfetch://content/{source_id}"})`,
     inputSchema: getFetchInputSchema(),
+    annotations: {
+      title: 'Fetch Content',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
   },
   {
     name: 'extract',
+    title: 'Extract Content',
     description: `Extract and normalize content from raw bytes or a URL.
 
 Use this when you already have content and want to process it into an LLMPacket.
@@ -371,9 +391,17 @@ Supports all content types: HTML, Markdown, PDF, JSON, XML.
 
 After success, retrieve cached content via: mcp__web-fetch.read_mcp_resource({"uri": "webfetch://content/{source_id}"})`,
     inputSchema: getExtractInputSchema(),
+    annotations: {
+      title: 'Extract Content',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
   },
   {
     name: 'chunk',
+    title: 'Chunk Content',
     description: `Split an LLMPacket into semantic chunks for context-limited processing.
 
 Chunks preserve:
@@ -383,9 +411,17 @@ Chunks preserve:
 
 Each chunk includes heading path for context.`,
     inputSchema: getChunkInputSchema(),
+    annotations: {
+      title: 'Chunk Content',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
   },
   {
     name: 'compact',
+    title: 'Compact Content',
     description: `Intelligently compress content while preserving key information.
 
 Compaction modes:
@@ -396,9 +432,17 @@ Compaction modes:
 
 Always preserves numbers, dates, names, definitions, and procedures.`,
     inputSchema: getCompactInputSchema(),
+    annotations: {
+      title: 'Compact Content',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
   },
   {
     name: 'ai_search_query',
+    title: 'AI Search Query',
     description: `Query Cloudflare AI Search over the scoped knowledge base built by fetch().
 
 By default, results are scoped to the current conversation/thread (or workspace fallback) based on:
@@ -407,6 +451,13 @@ By default, results are scoped to the current conversation/thread (or workspace 
 
 Use this for: \"What did I read about X?\" without fetching again.`,
     inputSchema: getAiSearchQueryInputSchema(),
+    annotations: {
+      title: 'AI Search Query',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
   },
 ];
 
@@ -621,14 +672,8 @@ async function main(): Promise<void> {
 
     try {
       switch (name) {
-        case 'fetch': {
-          const argsObject = requireRecord(args, 'arguments');
-          const url = requireString(argsObject['url'], 'url');
-          const options = optionalRecord(argsObject['options'], 'options');
-          const result = await executeFetch({
-            url,
-            options,
-          });
+      case 'fetch': {
+        const result = await executeFetch(parseFetchToolArguments(args));
 
           return {
             content: [
@@ -692,7 +737,7 @@ async function main(): Promise<void> {
 
         case 'chunk': {
           const argsObject = requireRecord(args, 'arguments');
-          const packet = requireRecord(argsObject['packet'], 'packet');
+          const packet = coerceJsonRecord(argsObject['packet'], 'packet');
           const options = optionalRecord(argsObject['options'], 'options');
           const result = executeChunk({
             packet: packet as never,
@@ -712,9 +757,9 @@ async function main(): Promise<void> {
 
         case 'compact': {
           const argsObject = requireRecord(args, 'arguments');
-          const input = requireRecord(argsObject['input'], 'input');
+          const input = coerceJsonRecord(argsObject['input'], 'input');
           const options = optionalRecord(argsObject['options'], 'options');
-          const result = executeCompact({
+          const result = await executeCompact({
             input: input as never,
             options,
           });

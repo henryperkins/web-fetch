@@ -1,7 +1,7 @@
 import type { Resource, ResourceTemplate, TextResourceContents, BlobResourceContents } from '@modelcontextprotocol/sdk/types.js';
 import { McpError } from '@modelcontextprotocol/sdk/types.js';
-import { toNormalizedContent } from '../processing/normalizer.js';
 import { getHostname } from '../utils/url.js';
+import { toNormalizedContent } from '../processing/normalizer.js';
 import type { ResourceStore, ResourceEntry } from './store.js';
 import { buildResourceUri, buildResourceUriTemplate, parseResourceUri, type ResourceKind } from './uri.js';
 
