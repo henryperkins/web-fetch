@@ -9,7 +9,8 @@ A Model Context Protocol (MCP) server that provides safe, high-signal web browsi
 - **Security first**: SSRF protection, prompt injection detection, rate limiting
 - **LLM-optimized output**: Structured packets with citations, outlines, and metadata
 - **Context management**: Semantic chunking and intelligent compaction
-- **AI Search ingestion**: Optional Cloudflare R2 uploads for AI Search indexing
+- **AI Search**: Conversation-scoped knowledge base via Cloudflare R2 + AI Search
+- **AI Gateway**: Optional LLM-powered compaction via Cloudflare AI Gateway
 
 ## Architecture Overview
 
@@ -23,7 +24,7 @@ A Model Context Protocol (MCP) server that provides safe, high-signal web browsi
 │                      web-fetch-mcp Server                       │
 │  ┌─────────────────────────────────────────────────────────┐   │
 │  │                      MCP Tools                           │   │
-│  │  fetch() │ extract() │ chunk() │ compact()              │   │
+│  │  fetch │ extract │ chunk │ compact │ ai_search_query     │   │
 │  └─────────────────────────────────────────────────────────┘   │
 │                              │                                  │
 │  ┌───────────────────────────┼───────────────────────────────┐ │
@@ -44,6 +45,11 @@ A Model Context Protocol (MCP) server that provides safe, high-signal web browsi
 │  ┌───────────────────────────┼───────────────────────────────┐ │
 │  │                 Processing Layer                          │ │
 │  │  Normalizer │ Chunker │ Compactor │ Outline Generator    │ │
+│  └───────────────────────────┼───────────────────────────────┘ │
+│                              │                                  │
+│  ┌───────────────────────────┼───────────────────────────────┐ │
+│  │               AI Search / AI Gateway                     │ │
+│  │  R2 Upload │ Scoped Queries │ LLM Compaction             │ │
 │  └───────────────────────────┴───────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -60,42 +66,21 @@ npx playwright install chromium
 
 ## Configuration
 
-Copy `.env.example` to `.env` and customize:
+Copy `.env.example` to `.env` and customize. All settings have sensible defaults.
 
-```bash
-# Fetch limits
-MAX_BYTES=10485760          # 10MB max response
-TIMEOUT_MS=30000            # 30s timeout
-MAX_REDIRECTS=5
+See [`.env.example`](.env.example) for the full annotated list. Key sections:
 
-# Security
-BLOCK_PRIVATE_IP=true       # SSRF protection
-RATE_LIMIT_PER_HOST=60      # Requests per minute
-
-# Features
-PLAYWRIGHT_ENABLED=false    # Enable browser rendering
-PDF_ENABLED=true            # Enable PDF extraction
-RESPECT_ROBOTS=true         # Honor robots.txt
-
-# Processing
-DEFAULT_MAX_TOKENS=4000
-CHUNK_MARGIN_RATIO=0.10
-
-# Cloudflare AI Search (optional)
-AI_SEARCH_ENABLED=false
-CF_ACCOUNT_ID=your_account_id
-CF_AI_SEARCH_NAME=your_ai_search_name
-CF_AI_SEARCH_API_TOKEN=your_api_token
-CF_R2_BUCKET=your_r2_bucket
-CF_R2_ACCESS_KEY_ID=your_r2_access_key_id
-CF_R2_SECRET_ACCESS_KEY=your_r2_secret_access_key
-CF_R2_ENDPOINT=https://<account_id>.r2.cloudflarestorage.com
-CF_R2_PREFIX=ai-search/
-AI_SEARCH_MAX_FILE_BYTES=4194304
-AI_SEARCH_QUERY_TIMEOUT_MS=15000
-AI_SEARCH_QUERY_WAIT_MS=0
-AI_SEARCH_MAX_QUERY_WAIT_MS=15000
-```
+| Section | Variables | Purpose |
+|---------|-----------|---------|
+| Fetch limits | `MAX_BYTES`, `TIMEOUT_MS`, `MAX_REDIRECTS` | Control request size, timing, redirects |
+| Security | `BLOCK_PRIVATE_IP`, `ALLOWLIST_DOMAINS`, `RATE_LIMIT_PER_HOST` | SSRF protection, domain filtering, rate limiting |
+| Processing | `DEFAULT_MAX_TOKENS`, `CHUNK_MARGIN_RATIO`, `RESPECT_ROBOTS` | Chunking/compaction defaults |
+| Features | `PLAYWRIGHT_ENABLED`, `PDF_ENABLED` | Toggle optional capabilities |
+| Caching | `CACHE_TTL_S` | In-memory resource cache TTL (default: 300s) |
+| Rendering | `RENDER_BLOCK_THIRD_PARTY`, `RENDER_TIMEOUT_MS`, `USER_AGENT` | Browser rendering settings |
+| AI Gateway | `CF_AI_GATEWAY_ENDPOINT`, `CF_AIG_TOKEN`, `CF_AI_GATEWAY_MODEL` | LLM-powered compaction |
+| AI Search | `AI_SEARCH_ENABLED`, `CF_ACCOUNT_ID`, `CF_R2_BUCKET`, ... | Cloudflare AI Search ingestion |
+| AI Search Scoping | `AI_SEARCH_SCOPE`, `WEB_FETCH_THREAD_KEY`, `AI_SEARCH_STATE_DIR` | Conversation/workspace isolation |
 
 ## MCP Tools
 
@@ -110,7 +95,7 @@ Fetch and extract content from a URL or raw bytes.
 - `canonical_url`: Canonical URL for `raw_bytes`
 
 **Options:**
-- `mode`: `"auto" | "http" | "render"` - Fetch mode (render uses Playwright)
+- `mode`: `"auto" | "http" | "render"` — Fetch mode (render uses Playwright)
 - `headers`: Custom HTTP headers
 - `timeout_ms`: Request timeout
 - `max_bytes`: Maximum response size
@@ -131,10 +116,11 @@ Fetch and extract content from a URL or raw bytes.
   - `include_raw_excerpt`: Include raw HTML snippet
 - `ai_search`: Cloudflare AI Search ingestion options
   - `enabled`: Upload extracted content to R2 for AI Search indexing
+  - `thread_key`: Conversation/thread identifier for scoping
   - `prefix`: Optional R2 key prefix
   - `max_file_bytes`: Per-file byte cap before splitting
-  - `wait_ms`: Optional delay before running AI Search query (note: AI Search indexes asynchronously, so immediate queries after upload may not include new content)
-  - `skip_if_exists`: Skip upload if the first part exists
+  - `wait_ms`: Delay before running AI Search query (indexes asynchronously)
+  - `skip_if_exists`: Skip upload if content already exists in R2
   - `require_success`: Fail the fetch tool if upload or query fails
   - `query`: Optional AI Search query (REST API)
     - `query`: Query string
@@ -142,7 +128,7 @@ Fetch and extract content from a URL or raw bytes.
     - `rewrite_query`, `max_num_results`, `ranking_options`, `reranking`, `filters`, `model`, `system_prompt`
   - Note: `ai_search` is skipped when `format.output` is `raw`
 
-Fetch responses include diagnostics fields:
+**Response diagnostics:**
 - `request_id`: Unique ID for the fetch request
 - `duration_ms`: End-to-end request duration in milliseconds
 - `retry_count`: Number of HTTP retries performed
@@ -151,7 +137,7 @@ When `success` is false, `error.details` may include `url`, `status_code`, and `
 
 ### 2. `extract(input, options)`
 
-Extract content from raw bytes or URL.
+Extract content from raw bytes or URL. Consider using `fetch` instead for the full pipeline (caching, AI Search, diagnostics).
 
 **Input:**
 - `url`: URL to fetch and extract
@@ -171,7 +157,7 @@ Split content into semantic chunks.
 
 ### 4. `compact(input, options)`
 
-Intelligently compress content.
+Intelligently compress content. When AI Gateway is configured, `map_reduce` and `question_focused` modes use LLM-powered summarization.
 
 **Options:**
 - `max_tokens`: Target output size
@@ -183,14 +169,76 @@ Intelligently compress content.
 - `question`: Focus question (for question_focused mode)
 - `preserve`: Content types to keep: `["numbers", "dates", "names", "definitions", "procedures"]`
 
+### 5. `ai_search_query(query, options)`
+
+Query the conversation-scoped knowledge base built by `fetch()`. Results are automatically scoped based on `AI_SEARCH_SCOPE` configuration.
+
+**Input:**
+- `query`: AI Search query options (auto-scoped)
+  - `query`: Query string (required)
+  - `mode`: `"search" | "ai_search"`
+  - `rewrite_query`: Boolean
+  - `max_num_results`: Number
+  - `ranking_options`: `{ score_threshold: number }`
+  - `reranking`: `{ enabled: boolean, model: string }`
+  - `filters`: Additional filter object
+  - `model`: Custom model name
+  - `system_prompt`: Custom system prompt
+- `thread_key`: Override the conversation thread key for this request
+
+## AI Search Scoping
+
+When AI Search is enabled, uploaded content and queries are scoped to prevent cross-conversation leakage. This is configured via environment variables and persisted across server restarts.
+
+### Scope modes
+
+| Mode | Env Value | Behavior |
+|------|-----------|----------|
+| **Conversation** (default) | `AI_SEARCH_SCOPE=conversation` | Each conversation gets its own isolated namespace via `thread_key` |
+| **Workspace** | `AI_SEARCH_SCOPE=workspace` | Shared per workspace (git repo root or `AI_SEARCH_WORKSPACE_ROOT`) |
+| **Global** | `AI_SEARCH_SCOPE=global` | No isolation — all content is shared |
+
+### Thread key resolution
+
+The thread key is resolved in order:
+1. Per-request `thread_key` parameter (in `ai_search` options)
+2. `WEB_FETCH_THREAD_KEY` env var (aliases: `AI_SEARCH_THREAD_KEY`, `MCP_THREAD_KEY`)
+3. Auto-generated from workspace if no key is provided
+
+### State persistence
+
+The mapping from `(workspace_id, thread_key)` → `conversation_id` is persisted to `~/.config/web-fetch-mcp/ai-search-state.json` (configurable via `AI_SEARCH_STATE_DIR`). This means conversation scoping survives server restarts.
+
+### R2 prefix structure
+
+Uploads are automatically prefixed based on scope:
+- **Global**: `{prefix}/`
+- **Workspace**: `{prefix}/workspaces/{workspace_id}/`
+- **Conversation**: `{prefix}/workspaces/{workspace_id}/conversations/{conversation_id}/`
+
+## AI Gateway (LLM-Powered Compaction)
+
+When configured, `compact` modes `map_reduce` and `question_focused` use an LLM via Cloudflare AI Gateway for higher-quality summarization.
+
+```bash
+CF_AI_GATEWAY_ENDPOINT=https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/compat/chat/completions
+CF_AIG_TOKEN=your_token
+CF_AI_GATEWAY_MODEL=your_model
+CF_AI_GATEWAY_TIMEOUT_MS=60000
+```
+
+The gateway uses OpenAI-compatible chat completions. Without AI Gateway configured, compaction falls back to local heuristic-based processing.
+
 ## MCP Prompts
 
-This server exposes static prompt templates for user-invoked workflows:
+This server exposes prompt templates for user-invoked workflows:
 
 - `fetch_url`: args `url` (required), `mode`, `extraction` (JSON string)
 - `fetch_and_chunk`: args `url` (required), `max_tokens`, `strategy`
 - `fetch_and_compact`: args `url` (required), `max_tokens`, `mode`, `question`
 - `fetch_ai_search`: args `url` (required), `query` (required), `wait_ms`, `mode`
+- `ai_search_query`: args `query` (required), `mode`, `thread_key`
+- `resources_tips`: no args — guidance on reusing fetched content via MCP resources
 
 Prompts are discoverable via `prompts/list` and retrievable via `prompts/get`.
 
@@ -228,7 +276,7 @@ Example resource URI completion (source_id suggestions):
 
 ## MCP Resources
 
-This server exposes recently fetched packets as MCP resources using a custom `webfetch://` URI scheme. Resources are stored in-memory (TTL follows `CACHE_TTL_S`), so they are not persisted across restarts.
+Recently fetched packets are exposed as MCP resources using a custom `webfetch://` URI scheme. Resources are stored in-memory with TTL controlled by `CACHE_TTL_S` (default: 300s) and are not persisted across restarts.
 
 Resource list entries use `webfetch://packet/{source_id}` and include metadata like title, lastModified, and size. Reads support:
 
@@ -237,7 +285,7 @@ Resource list entries use `webfetch://packet/{source_id}` and include metadata l
 - `webfetch://normalized/{source_id}`: NormalizedContent JSON (`application/json`)
 - `webfetch://screenshot/{source_id}`: Screenshot blob (`image/png`, only if captured)
 
-The server emits `notifications/resources/list_changed` when new resources are stored.
+The server emits `notifications/resources/list_changed` when new resources are stored. Tool, prompt, and resource lists support cursor-based pagination (page size: 50).
 
 ## Output Format: LLMPacket
 
@@ -266,7 +314,7 @@ The server emits `notifications/resources/list_changed` when new resources are s
   "content": "# Introduction\n\nContent in markdown format...",
   "source_summary": [
     "Main topics: Introduction, Background, Results",
-    "Key numbers mentioned: 42%, $1.5M",
+    "Key figures: $53m, 700 jobs",
     "Content length: ~2500 words"
   ],
   "unsafe_instructions_detected": [],
@@ -303,124 +351,6 @@ The server emits `notifications/resources/list_changed` when new resources are s
 - Removes hidden content
 - Detects paywalled pages
 
-## Usage Examples
-
-### Basic HTML Fetch
-
-```javascript
-// Fetch an article
-const result = await mcp.callTool('fetch', {
-  url: 'https://example.com/article',
-  options: {
-    mode: 'http'
-  }
-});
-
-console.log(result.packet.content);
-console.log(result.packet.metadata.title);
-```
-
-### JavaScript-Rendered Page
-
-```javascript
-// Fetch a SPA page
-const result = await mcp.callTool('fetch', {
-  url: 'https://spa-site.com/page',
-  options: {
-    mode: 'render',
-    render: {
-      wait_until: 'networkidle',
-      wait_ms: 2000,
-      screenshot: true
-    }
-  }
-});
-```
-
-### PDF Extraction
-
-```javascript
-// Fetch and extract PDF
-const result = await mcp.callTool('fetch', {
-  url: 'https://example.com/document.pdf',
-  options: {
-    mode: 'http'
-  }
-});
-
-// result.packet.metadata.page_count
-// result.packet.content contains extracted text
-```
-
-### Chunking for Context Limits
-
-```javascript
-// First fetch
-const fetchResult = await mcp.callTool('fetch', {
-  url: 'https://example.com/long-article'
-});
-
-// Then chunk for 4K context
-const chunkResult = await mcp.callTool('chunk', {
-  packet: fetchResult.packet,
-  options: {
-    max_tokens: 4000,
-    strategy: 'headings_first'
-  }
-});
-
-// Process chunks
-for (const chunk of chunkResult.chunks.chunks) {
-  console.log(`Chunk ${chunk.chunk_index}: ${chunk.headings_path}`);
-  // Use chunk.text for processing
-}
-```
-
-### Question-Focused Compaction
-
-```javascript
-// Fetch content
-const fetchResult = await mcp.callTool('fetch', {
-  url: 'https://example.com/research-paper'
-});
-
-// Compact focused on a question
-const compactResult = await mcp.callTool('compact', {
-  input: fetchResult.packet,
-  options: {
-    max_tokens: 1000,
-    mode: 'question_focused',
-    question: 'What are the main findings of this research?',
-    preserve: ['numbers', 'dates', 'names']
-  }
-});
-
-console.log(compactResult.compacted.summary);
-console.log(compactResult.compacted.key_points);
-```
-
-### Fetch + AI Search upload
-
-```javascript
-const result = await mcp.callTool('fetch', {
-  url: 'https://example.com/guide',
-  options: {
-    mode: 'http',
-    ai_search: {
-      enabled: true,
-      prefix: 'docs/',
-      query: {
-        query: 'pricing limits',
-        mode: 'search',
-        max_num_results: 5
-      }
-    }
-  }
-});
-
-console.log(result.ai_search);
-```
-
 ## Threat Model & Mitigations
 
 | Threat | Mitigation |
@@ -442,8 +372,8 @@ console.log(result.ai_search);
 # Unit tests
 npm test
 
-# Integration tests (requires network)
-npm test -- --testPathPattern=integration
+# Watch mode
+npm run test:watch
 
 # Coverage
 npm run test:coverage
@@ -454,20 +384,27 @@ npm run test:coverage
 ```
 web-fetch-mcp/
 ├── src/
-│   ├── index.ts              # MCP server entry
-│   ├── config.ts             # Configuration
-│   ├── types.ts              # TypeScript types
+│   ├── index.ts                  # MCP server entry, tool/prompt/resource registration
+│   ├── config.ts                 # Configuration from env vars
+│   ├── types.ts                  # TypeScript types
+│   ├── completions.ts            # MCP completion/complete handler
+│   ├── pagination.ts             # Cursor-based pagination for list endpoints
+│   ├── ai-gateway/
+│   │   └── client.ts             # Cloudflare AI Gateway (LLM compaction)
 │   ├── ai-search/
-│   │   └── index.ts           # Cloudflare AI Search ingestion
+│   │   ├── index.ts              # R2 upload, AI Search query, content quality gating
+│   │   └── state.ts              # Conversation-scope persistence
 │   ├── tools/
-│   │   ├── fetch.ts          # fetch tool
-│   │   ├── extract.ts        # extract tool
-│   │   ├── chunk.ts          # chunk tool
-│   │   └── compact.ts        # compact tool
+│   │   ├── fetch.ts              # fetch tool
+│   │   ├── fetch-contract.ts     # Fetch input parsing/validation
+│   │   ├── extract.ts            # extract tool
+│   │   ├── chunk.ts              # chunk tool
+│   │   ├── compact.ts            # compact tool
+│   │   └── ai-search-query.ts    # ai_search_query tool
 │   ├── fetcher/
-│   │   ├── http-fetcher.ts   # HTTP fetching
-│   │   ├── browser-renderer.ts # Playwright
-│   │   └── robots.ts         # robots.txt
+│   │   ├── http-fetcher.ts       # HTTP fetching (undici)
+│   │   ├── browser-renderer.ts   # Playwright rendering
+│   │   └── robots.ts             # robots.txt handling
 │   ├── extractors/
 │   │   ├── html-extractor.ts
 │   │   ├── markdown-extractor.ts
@@ -476,15 +413,20 @@ web-fetch-mcp/
 │   │   ├── xml-extractor.ts
 │   │   └── text-extractor.ts
 │   ├── processing/
-│   │   ├── normalizer.ts
-│   │   ├── chunker.ts
-│   │   ├── compactor.ts
-│   │   └── outline.ts
+│   │   ├── normalizer.ts         # Content normalization, key_blocks, source_summary
+│   │   ├── chunker.ts            # Semantic chunking
+│   │   ├── compactor.ts          # Content compaction (4 modes)
+│   │   ├── outline.ts            # Document outline generation
+│   │   └── synonyms.ts           # Synonym expansion for question-focused compaction
 │   ├── security/
 │   │   ├── ssrf-guard.ts
 │   │   ├── injection-detector.ts
 │   │   ├── content-sanitizer.ts
 │   │   └── rate-limiter.ts
+│   ├── resources/
+│   │   ├── handlers.ts           # MCP resource read/list handlers
+│   │   ├── store.ts              # In-memory resource store with TTL
+│   │   └── uri.ts                # webfetch:// URI parsing
 │   └── utils/
 │       ├── hash.ts
 │       ├── url.ts
@@ -493,6 +435,9 @@ web-fetch-mcp/
 ├── tests/
 │   ├── unit/
 │   └── integration/
+├── scripts/
+│   └── batch-fetch-wp-docs.ts    # Batch document fetcher utility
+├── .env.example
 ├── package.json
 ├── tsconfig.json
 └── README.md
