@@ -122,10 +122,23 @@ Fetch and extract content from a URL or raw bytes.
   - `wait_ms`: Delay before running AI Search query (indexes asynchronously)
   - `skip_if_exists`: Skip upload if content already exists in R2
   - `require_success`: Fail the fetch tool if upload or query fails
-  - `query`: Optional AI Search query (REST API)
-    - `query`: Query string
-    - `mode`: `"search" | "ai_search"` (retrieval only or retrieval+generation)
-    - `rewrite_query`, `max_num_results`, `ranking_options`, `reranking`, `filters`, `model`, `system_prompt`
+  - `context`: Custom context string for R2 metadata (auto-generated from title/URL/summary if omitted)
+  - `metadata`: Custom key-value metadata for R2 objects (see [Metadata Schema](#metadata-schema))
+  - `query`: Optional AI Search query after upload
+    - `messages`: Array of `{ content, role }` objects for multi-turn queries (primary format)
+    - `query`: Single query string (backward-compatible alias; sent as a user message)
+    - `mode`: `"search"` (retrieval only) or `"ai_search"` (retrieval + generation)
+    - `stream`: Boolean — stream the response as SSE (only for `ai_search` mode; see [Streaming](#streaming))
+    - `ai_search_options`: Per-request overrides
+      - `retrieval.filters`: Vectorize-style field filters (see [Filter Format](#filter-format))
+      - `retrieval.max_num_results`: Max chunks returned
+      - `retrieval.retrieval_type`: `"vector"` | `"keyword"` | `"hybrid"`
+      - `retrieval.match_threshold`: Minimum similarity score (0–1)
+      - `cache.enabled`: Override instance cache setting
+      - `reranking.enabled`: Override instance reranking setting
+    - `model`: Custom model name (only for `ai_search` mode)
+    - `system_prompt`: Custom system prompt
+    - Backward-compatible flat aliases: `max_num_results`, `retrieval_type`, `match_threshold`, `reranking`, `filters`, `cache`, `ranking_options`
   - Note: `ai_search` is skipped when `format.output` is `raw`
 
 **Response diagnostics:**
@@ -174,16 +187,21 @@ Intelligently compress content. When AI Gateway is configured, `map_reduce` and 
 Query the conversation-scoped knowledge base built by `fetch()`. Results are automatically scoped based on `AI_SEARCH_SCOPE` configuration.
 
 **Input:**
-- `query`: AI Search query options (auto-scoped)
-  - `query`: Query string (required)
-  - `mode`: `"search" | "ai_search"`
-  - `rewrite_query`: Boolean
-  - `max_num_results`: Number
-  - `ranking_options`: `{ score_threshold: number }`
-  - `reranking`: `{ enabled: boolean, model: string }`
-  - `filters`: Additional filter object
-  - `model`: Custom model name
+- `query`: AI Search query options (auto-scoped). Either `messages` or `query` is required.
+  - `messages`: Array of `{ content: string, role: "user"|"system"|"assistant" }` (primary format)
+  - `query`: Single query string (backward-compatible alias)
+  - `mode`: `"search"` (chunks only) or `"ai_search"` (chunks + generated answer)
+  - `stream`: Boolean — stream the response as SSE events (only for `ai_search` mode)
+  - `ai_search_options`: Per-request overrides
+    - `retrieval.filters`: Vectorize-style metadata filters (see [Filter Format](#filter-format))
+    - `retrieval.max_num_results`: Max chunks
+    - `retrieval.retrieval_type`: `"vector"` | `"keyword"` | `"hybrid"`
+    - `retrieval.match_threshold`: Minimum similarity (0–1)
+    - `cache.enabled`: Boolean
+    - `reranking.enabled`: Boolean
+  - `model`: Custom model name (for `ai_search` mode)
   - `system_prompt`: Custom system prompt
+  - Backward-compatible flat aliases: `max_num_results`, `retrieval_type`, `match_threshold`, `reranking`, `filters`, `cache`, `ranking_options`
 - `thread_key`: Override the conversation thread key for this request
 
 ## AI Search Scoping
@@ -215,6 +233,85 @@ Uploads are automatically prefixed based on scope:
 - **Global**: `{prefix}/`
 - **Workspace**: `{prefix}/workspaces/{workspace_id}/`
 - **Conversation**: `{prefix}/workspaces/{workspace_id}/conversations/{conversation_id}/`
+
+### Quick examples
+
+Fetch a page and query AI Search with the new message format:
+
+```json
+{
+  "url": "https://example.com/docs/setup",
+  "options": {
+    "ai_search": {
+      "enabled": true,
+      "query": {
+        "messages": [{ "content": "How do I configure authentication?", "role": "user" }],
+        "mode": "ai_search",
+        "ai_search_options": {
+          "retrieval": { "max_num_results": 5, "retrieval_type": "hybrid" }
+        }
+      }
+    }
+  }
+}
+```
+
+Standalone query with backward-compatible `query` string:
+
+```json
+{
+  "query": { "query": "authentication setup", "mode": "search" }
+}
+```
+
+Multi-turn conversation with streaming:
+
+```json
+{
+  "query": {
+    "messages": [
+      { "role": "system", "content": "Use only indexed material." },
+      { "role": "user", "content": "Summarize the setup docs" }
+    ],
+    "mode": "ai_search",
+    "stream": true
+  }
+}
+```
+
+### Filter format
+
+Filters use Vectorize-style field constraints. Multiple top-level keys are AND-combined.
+
+| Operator | Example | Meaning |
+|----------|---------|---------|
+| Implicit `$eq` | `{ "tag": "docs" }` | tag equals "docs" |
+| `$ne` | `{ "tag": { "$ne": "draft" } }` | tag is not "draft" |
+| `$in` | `{ "tag": { "$in": ["docs", "guides"] } }` | tag is "docs" or "guides" |
+| `$nin` | `{ "tag": { "$nin": ["draft"] } }` | tag is not in list |
+| `$gt` / `$gte` | `{ "score": { "$gte": 0.8 } }` | score >= 0.8 |
+| `$lt` / `$lte` | `{ "score": { "$lt": 1.0 } }` | score < 1.0 |
+
+> **Backward compatibility:** Legacy `{ type: "and", filters: [{ type: "eq", key: "tag", value: "docs" }] }` filter trees are automatically translated to the Vectorize format.
+
+#### OR filter limitations
+
+The Cloudflare AI Search REST API only supports AND-combined filters. OR is not available at the API level.
+
+**Workarounds:**
+- **Same-field OR:** Use `$in` — e.g., `{ "folder": { "$in": ["docs/", "guides/"] } }`
+- **Cross-field OR:** Make separate `ai_search_query` calls with different filters and merge results client-side
+
+### Metadata schema
+
+R2 uploads include metadata that AI Search can use for filtering and context generation.
+
+- **`context`** is a built-in AI Search field — it is always recognized and used to guide response generation. Auto-generated from the page title, URL, and summary when not provided explicitly.
+- **Custom metadata fields** (e.g., `{ "category": "docs" }`) are written as R2 object metadata (`x-amz-meta-*` headers). To filter on these fields in AI Search queries, they must be declared in the AI Search instance's `custom_metadata` schema. Maximum 5 custom fields per instance. Reserved names (`timestamp`, `folder`, `filename`) are skipped.
+
+### Streaming
+
+When `stream: true` is set for `ai_search` mode, the server processes the SSE stream incrementally from Cloudflare but returns the assembled result as a single MCP tool response (MCP protocol constraint). The assembled result includes the concatenated `text`, retrieved `chunks`, and the full `events` array.
 
 ## AI Gateway (LLM-Powered Compaction)
 

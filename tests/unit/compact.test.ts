@@ -398,6 +398,41 @@ More cooking tips and pantry notes.`,
     });
   });
 
+  describe('question_focused finds terms inside code blocks', () => {
+    it('should include code block content when it matches the question', async () => {
+      const packet = {
+        source_id: 'code-block-test',
+        content: `# API Reference
+
+Some introductory text about the API.
+
+\`\`\`json
+{
+  "slideshow": {
+    "title": "Sample Slide Show",
+    "author": "Yours Truly"
+  }
+}
+\`\`\`
+
+Unrelated closing paragraph about deployment.`,
+      } as LLMPacket;
+
+      const result = await executeCompact({
+        input: packet,
+        options: {
+          mode: 'question_focused',
+          question: 'What is the title of the slideshow?',
+          max_tokens: 300,
+        },
+      });
+
+      expect(result.success).toBe(true);
+      const summary = result.compacted?.compacted.summary ?? '';
+      expect(summary).toContain('Sample Slide Show');
+    });
+  });
+
   describe('important_quotes matches single quotes', () => {
     it('should extract single-quoted text as quotes', async () => {
       const content = [

@@ -828,14 +828,37 @@ export function getFetchInputSchema(): object {
                 type: 'boolean',
                 description: 'Fail the fetch tool if AI Search upload or query fails',
               },
+              context: {
+                type: 'string',
+                description: 'Optional R2 metadata context passed to AI Search chat responses',
+              },
+              metadata: {
+                type: 'object',
+                description: 'Optional custom R2 metadata written as x-amz-meta-* headers',
+                additionalProperties: { type: 'string' },
+              },
               query: {
                 type: 'object',
                 description: 'Optional AI Search query after upload',
                 properties: {
-                  query: { type: 'string' },
+                  query: { type: 'string', description: 'Compatibility alias for a single user message' },
+                  messages: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        content: { type: 'string' },
+                        role: { type: 'string', enum: ['user', 'system', 'assistant'] },
+                      },
+                      required: ['content', 'role'],
+                    },
+                  },
                   mode: { type: 'string', enum: ['search', 'ai_search'] },
                   rewrite_query: { type: 'boolean' },
+                  stream: { type: 'boolean' },
                   max_num_results: { type: 'number' },
+                  retrieval_type: { type: 'string', enum: ['vector', 'keyword', 'hybrid'] },
+                  match_threshold: { type: 'number' },
                   ranking_options: {
                     type: 'object',
                     properties: {
@@ -850,10 +873,46 @@ export function getFetchInputSchema(): object {
                     },
                   },
                   filters: { type: 'object' },
+                  cache: {
+                    type: 'object',
+                    properties: {
+                      enabled: { type: 'boolean' },
+                    },
+                  },
+                  ai_search_options: {
+                    type: 'object',
+                    properties: {
+                      retrieval: {
+                        type: 'object',
+                        properties: {
+                          filters: { type: 'object' },
+                          max_num_results: { type: 'number' },
+                          retrieval_type: { type: 'string', enum: ['vector', 'keyword', 'hybrid'] },
+                          match_threshold: { type: 'number' },
+                        },
+                      },
+                      cache: {
+                        type: 'object',
+                        properties: {
+                          enabled: { type: 'boolean' },
+                        },
+                      },
+                      reranking: {
+                        type: 'object',
+                        properties: {
+                          enabled: { type: 'boolean' },
+                          model: { type: 'string' },
+                        },
+                      },
+                    },
+                  },
                   model: { type: 'string' },
                   system_prompt: { type: 'string' },
                 },
-                required: ['query'],
+                anyOf: [
+                  { required: ['query'] },
+                  { required: ['messages'] },
+                ],
               },
             },
           },

@@ -6,6 +6,7 @@
  */
 
 import { request, Agent } from 'undici';
+import { readFileSync } from 'node:fs';
 import { brotliDecompressSync, gunzipSync, inflateSync } from 'zlib';
 import { checkSSRF } from '../security/ssrf-guard.js';
 import { getRateLimiter, waitForRateLimit } from '../security/rate-limiter.js';
@@ -50,11 +51,22 @@ export type HttpFetchResultWithRetries = (HttpFetchResultSuccess | HttpFetchResu
   attempts: number;
 };
 
+function buildConnectOptions(): { ca?: string[] } | undefined {
+  const caPath = process.env['NODE_EXTRA_CA_CERTS'];
+  if (!caPath) return undefined;
+  try {
+    return { ca: [readFileSync(caPath, 'utf8')] };
+  } catch {
+    return undefined;
+  }
+}
+
 // Keep-alive agent for connection pooling
 const agent = new Agent({
   keepAliveTimeout: 30000,
   keepAliveMaxTimeout: 60000,
   connections: 50,
+  connect: buildConnectOptions(),
 });
 
 function parseRetryAfterHeader(

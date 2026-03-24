@@ -478,6 +478,12 @@ function splitTextByTokens(content: string, maxTokens: number): string[] {
         const lineEnd = remaining.lastIndexOf('\n', splitPoint);
         if (lineEnd > splitPoint * 0.5) {
           splitPoint = lineEnd;
+        } else {
+          // Snap to nearest word boundary to avoid mid-word splits
+          const wordEnd = remaining.lastIndexOf(' ', splitPoint);
+          if (wordEnd > 0) {
+            splitPoint = wordEnd;
+          }
         }
       }
     }

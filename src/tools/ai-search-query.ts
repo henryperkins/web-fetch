@@ -73,10 +73,24 @@ export function getAiSearchQueryInputSchema() {
         type: 'object',
         description: 'AI Search query options (auto-scoped to the current conversation/workspace)',
         properties: {
-          query: { type: 'string' },
+          query: { type: 'string', description: 'Compatibility alias for a single user message' },
+          messages: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                content: { type: 'string' },
+                role: { type: 'string', enum: ['user', 'system', 'assistant'] },
+              },
+              required: ['content', 'role'],
+            },
+          },
           mode: { type: 'string', enum: ['search', 'ai_search'] },
           rewrite_query: { type: 'boolean' },
+          stream: { type: 'boolean' },
           max_num_results: { type: 'number' },
+          retrieval_type: { type: 'string', enum: ['vector', 'keyword', 'hybrid'] },
+          match_threshold: { type: 'number' },
           ranking_options: {
             type: 'object',
             properties: {
@@ -91,10 +105,46 @@ export function getAiSearchQueryInputSchema() {
             },
           },
           filters: { type: 'object' },
+          cache: {
+            type: 'object',
+            properties: {
+              enabled: { type: 'boolean' },
+            },
+          },
+          ai_search_options: {
+            type: 'object',
+            properties: {
+              retrieval: {
+                type: 'object',
+                properties: {
+                  filters: { type: 'object' },
+                  max_num_results: { type: 'number' },
+                  retrieval_type: { type: 'string', enum: ['vector', 'keyword', 'hybrid'] },
+                  match_threshold: { type: 'number' },
+                },
+              },
+              cache: {
+                type: 'object',
+                properties: {
+                  enabled: { type: 'boolean' },
+                },
+              },
+              reranking: {
+                type: 'object',
+                properties: {
+                  enabled: { type: 'boolean' },
+                  model: { type: 'string' },
+                },
+              },
+            },
+          },
           model: { type: 'string' },
           system_prompt: { type: 'string' },
         },
-        required: ['query'],
+        anyOf: [
+          { required: ['query'] },
+          { required: ['messages'] },
+        ],
       },
       thread_key: {
         type: 'string',

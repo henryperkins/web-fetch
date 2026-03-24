@@ -318,6 +318,24 @@ Content C`;
       const uniqueIds = new Set(ids);
       expect(uniqueIds.size).toBe(ids.length);
     });
+
+    it('should not split mid-word in balanced mode', () => {
+      // Known word list — long prose without paragraph or line breaks
+      const knownWords = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf', 'hotel', 'india', 'juliet', 'kilo', 'lima', 'mike', 'november', 'oscar', 'papa', 'quebec', 'romeo', 'sierra', 'tango', 'uniform', 'victor', 'whiskey', 'xray', 'yankee', 'zulu'];
+      const line = knownWords.join(' ');
+      const content = `${line} ${line} ${line}`;
+
+      const packet = createTestPacket(content);
+      const result = chunkContent(packet, { max_tokens: 30, margin_ratio: 0, strategy: 'balanced' });
+
+      expect(result.total_chunks).toBeGreaterThan(1);
+      for (const chunk of result.chunks) {
+        const chunkWords = chunk.text.trim().split(/\s+/);
+        for (const word of chunkWords) {
+          expect(knownWords).toContain(word);
+        }
+      }
+    });
   });
 
   describe('getChunk', () => {

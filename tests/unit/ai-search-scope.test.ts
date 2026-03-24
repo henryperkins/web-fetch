@@ -140,12 +140,18 @@ describe('queryAiSearchScoped scoping', () => {
     const result = await queryAiSearchScoped({ query: 'test' }, config);
 
     expect(result.error?.code).toBe('AI_SEARCH_NOT_CONFIGURED');
-    expect(result.request.filters).toEqual({
-      type: 'and',
-      filters: [
-        { type: 'gt', key: 'folder', value: scopePrefix },
-        { type: 'lte', key: 'folder', value: `${scopePrefix}z` },
-      ],
+    expect(result.request).toEqual({
+      messages: [{ content: 'test', role: 'user' }],
+      ai_search_options: {
+        retrieval: {
+          filters: {
+            folder: {
+              $gte: scopePrefix,
+              $lt: `${scopePrefix}0`,
+            },
+          },
+        },
+      },
     });
   });
 
@@ -162,16 +168,22 @@ describe('queryAiSearchScoped scoping', () => {
     const result = await queryAiSearchScoped({ query: 'test', filters: {} }, config);
 
     expect(result.error?.code).toBe('AI_SEARCH_NOT_CONFIGURED');
-    expect(result.request.filters).toEqual({
-      type: 'and',
-      filters: [
-        { type: 'gt', key: 'folder', value: scopePrefix },
-        { type: 'lte', key: 'folder', value: `${scopePrefix}z` },
-      ],
+    expect(result.request).toEqual({
+      messages: [{ content: 'test', role: 'user' }],
+      ai_search_options: {
+        retrieval: {
+          filters: {
+            folder: {
+              $gte: scopePrefix,
+              $lt: `${scopePrefix}0`,
+            },
+          },
+        },
+      },
     });
   });
 
-  it('nests OR filters under scope constraints', async () => {
+  it('translates legacy AND filters into the current Vectorize-style filter map', async () => {
     const workspaceRoot = path.join(tempDir, 'workspace');
     const config = createConfig({
       aiSearchScope: 'workspace',
@@ -180,6 +192,44 @@ describe('queryAiSearchScoped scoping', () => {
     });
     const workspaceId = computeWorkspaceId(workspaceRoot);
     const scopePrefix = `kb/workspaces/${workspaceId}/`;
+
+    const result = await queryAiSearchScoped(
+      {
+        query: 'test',
+        filters: {
+          type: 'and',
+          filters: [
+            { type: 'eq', key: 'tag', value: 'a' },
+          ],
+        },
+      },
+      config
+    );
+
+    expect(result.error?.code).toBe('AI_SEARCH_NOT_CONFIGURED');
+    expect(result.request).toEqual({
+      messages: [{ content: 'test', role: 'user' }],
+      ai_search_options: {
+        retrieval: {
+          filters: {
+            tag: 'a',
+            folder: {
+              $gte: scopePrefix,
+              $lt: `${scopePrefix}0`,
+            },
+          },
+        },
+      },
+    });
+  });
+
+  it('rejects legacy OR filters because the current REST API does not support them', async () => {
+    const workspaceRoot = path.join(tempDir, 'workspace');
+    const config = createConfig({
+      aiSearchScope: 'workspace',
+      aiSearchWorkspaceRoot: workspaceRoot,
+      aiSearchR2Prefix: 'kb',
+    });
 
     const result = await queryAiSearchScoped(
       {
@@ -195,20 +245,7 @@ describe('queryAiSearchScoped scoping', () => {
       config
     );
 
-    expect(result.error?.code).toBe('AI_SEARCH_NOT_CONFIGURED');
-    expect(result.request.filters).toEqual({
-      type: 'and',
-      filters: [
-        {
-          type: 'or',
-          filters: [
-            { type: 'eq', key: 'tag', value: 'a' },
-            { type: 'eq', key: 'tag', value: 'b' },
-          ],
-        },
-        { type: 'gt', key: 'folder', value: scopePrefix },
-        { type: 'lte', key: 'folder', value: `${scopePrefix}z` },
-      ],
-    });
+    expect(result.error?.code).toBe('AI_SEARCH_UNSUPPORTED_FILTERS');
+    expect(result.error?.message).toContain('OR filters are not supported');
   });
 });

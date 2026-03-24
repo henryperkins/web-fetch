@@ -862,6 +862,7 @@ function splitIntoSentences(content: string): string[] {
   let inCodeBlock = false;
   let fenceChar = '';
   let fenceLength = 0;
+  let codeBlockLines: string[] = [];
 
   const flushParagraph = (): void => {
     if (paragraphLines.length === 0) return;
@@ -882,8 +883,12 @@ function splitIntoSentences(content: string): string[] {
         inCodeBlock = true;
         fenceChar = markerChar;
         fenceLength = fenceMarker.length;
+        codeBlockLines = [line];
       } else if (markerChar === fenceChar && fenceMarker.length >= fenceLength) {
         inCodeBlock = false;
+        codeBlockLines.push(line);
+        sentences.push(codeBlockLines.join('\n'));
+        codeBlockLines = [];
         fenceChar = '';
         fenceLength = 0;
       }
@@ -891,6 +896,7 @@ function splitIntoSentences(content: string): string[] {
     }
 
     if (inCodeBlock) {
+      codeBlockLines.push(line);
       continue;
     }
 
@@ -910,6 +916,11 @@ function splitIntoSentences(content: string): string[] {
   }
 
   flushParagraph();
+
+  // Flush any unclosed code block
+  if (codeBlockLines.length > 0) {
+    sentences.push(codeBlockLines.join('\n'));
+  }
 
   return sentences;
 }

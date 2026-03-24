@@ -35,19 +35,49 @@ export interface FormatOptions {
 
 export type AiSearchQueryMode = 'search' | 'ai_search';
 
+export interface AiSearchMessage {
+  content: string;
+  role: 'user' | 'system' | 'assistant';
+}
+
+export interface AiSearchRetrievalOptions {
+  filters?: Record<string, unknown>;
+  max_num_results?: number;
+  retrieval_type?: 'vector' | 'keyword' | 'hybrid';
+  match_threshold?: number;
+}
+
+export interface AiSearchCacheOptions {
+  enabled?: boolean;
+}
+
+export interface AiSearchRerankingOptions {
+  enabled?: boolean;
+  model?: string;
+}
+
+export interface AiSearchRequestOptions {
+  retrieval?: AiSearchRetrievalOptions;
+  cache?: AiSearchCacheOptions;
+  reranking?: AiSearchRerankingOptions;
+}
+
 export interface AiSearchQueryOptions {
-  query: string;
+  query?: string;
+  messages?: AiSearchMessage[];
   mode?: AiSearchQueryMode;
   rewrite_query?: boolean;
+  stream?: boolean;
   max_num_results?: number;
+  retrieval_type?: 'vector' | 'keyword' | 'hybrid';
+  match_threshold?: number;
   ranking_options?: {
     score_threshold?: number;
   };
-  reranking?: {
-    enabled?: boolean;
-    model?: string;
-  };
+  reranking?: AiSearchRerankingOptions;
   filters?: Record<string, unknown>;
+  cache?: AiSearchCacheOptions;
+  ai_search_options?: AiSearchRequestOptions;
   model?: string;
   system_prompt?: string;
 }
@@ -60,6 +90,8 @@ export interface AiSearchOptions {
   wait_ms?: number;
   skip_if_exists?: boolean;
   require_success?: boolean;
+  context?: string;
+  metadata?: Record<string, string>;
   query?: AiSearchQueryOptions;
 }
 
